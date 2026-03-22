@@ -1,0 +1,308 @@
+from __future__ import annotations
+
+from datetime import timedelta
+from typing import Optional
+
+import config
+from evaluator import evaluate_submission, parse_metrics
+from generator import AlphaGenerator
+from models import Run, new_id, utc_now
+from scheduler import Scheduler
+from storage import Storage
+from brain_client import BrainClient, BrainAPIError
+
+
+class AlphaBot:
+    def __init__(
+        self,
+        storage: Storage,
+        client: BrainClient,
+        generator: AlphaGenerator,
+        scheduler: Scheduler,
+    ):
+        self.storage = storage
+        self.client = client
+        self.generator = generator
+        self.scheduler = scheduler
+
+        self.completed_runs = 0
+
+    def tick(self) -> None:
+        """
+        One loop iteration:
+        1. ensure session
+        2. poll current running sims
+        3. fill empty slots
+        """
+        self.client.ensure_session()
+        self._poll_running()
+        self._fill_capacity()
+
+    def _poll_running(self) -> None:
+        for sim_id, run_id in list(self.scheduler.active_items()):
+            try:
+                result = self.client.poll_simulation(sim_id)
+            except BrainAPIError as exc:
+                print(f"[POLL_ERROR] sim_id={sim_id} run_id={run_id} error={exc}")
+                continue
+            except Exception as exc:
+                print(f"[POLL_UNEXPECTED] sim_id={sim_id} run_id={run_id} error={exc}")
+                continue
+
+            status = result.get("status", "running")
+
+            if status in {"submitted", "running"}:
+                if status == "running":
+                    self.storage.update_run(run_id, status="running")
+                continue
+
+            self.scheduler.remove(sim_id)
+
+            if status == "completed":
+                self._handle_completed(run_id, result)
+
+            elif status == "failed":
+                error_message = result.get("error_message", "Simulation failed")
+                self.storage.update_run(
+                    run_id,
+                    status="failed",
+                    completed_at=utc_now(),
+                    error_message=error_message,
+                    raw_result=result,
+                )
+                print(f"[FAILED] run_id={run_id} sim_id={sim_id} error={error_message}")
+
+            elif status == "timed_out":
+                self.storage.update_run(
+                    run_id,
+                    status="timed_out",
+                    completed_at=utc_now(),
+                    error_message=result.get("error_message", "Timed out"),
+                    raw_result=result,
+                )
+                print(f"[TIMED_OUT] run_id={run_id} sim_id={sim_id}")
+
+            else:
+                self.storage.update_run(
+                    run_id,
+                    status=status,
+                    completed_at=utc_now(),
+                    raw_result=result,
+                )
+                print(f"[UNKNOWN_TERMINAL_STATUS] run_id={run_id} sim_id={sim_id} status={status}")
+
+    def _handle_completed(self, run_id: str, result: dict) -> None:
+        self.storage.update_run(
+            run_id,
+            status="completed",
+            completed_at=utc_now(),
+            raw_result=result,
+        )
+
+        run_row = self.storage.get_run_by_id(run_id)
+        if run_row is None:
+            print(f"[WARN] completed run not found in DB: run_id={run_id}")
+            return
+
+        candidate_id = run_row["candidate_id"]
+
+#        import json
+#        print("[DEBUG_COMPLETED_RAW]")
+#        print(json.dumps(result, indent=2, default=str))
+
+        metrics = parse_metrics(run_id, result)
+        self.storage.insert_metrics(metrics)
+
+        decision = evaluate_submission(candidate_id, metrics)
+
+        self.completed_runs += 1
+
+        sharpe_str = "None" if metrics.sharpe is None else f"{metrics.sharpe:.3f}"
+        fitness_str = "None" if metrics.fitness is None else f"{metrics.fitness:.3f}"
+        turnover_str = "None" if metrics.turnover is None else f"{metrics.turnover:.3f}"
+
+        print(
+            f"[COMPLETED] run_id={run_id} "
+            f"sharpe={sharpe_str} fitness={fitness_str} turnover={turnover_str} "
+            f"eligible={decision.should_submit} reason={decision.reason}"
+        )
+
+        if decision.should_submit and config.AUTO_SUBMIT:
+            self._attempt_submission(candidate_id, run_id, result)
+
+        if self.completed_runs % config.REPORT_EVERY_N_COMPLETIONS == 0:
+            self._print_progress_report()
+
+    def _attempt_submission(self, candidate_id: str, run_id: str, result: dict) -> None:
+        alpha_id = (
+            result.get("alpha_id")
+            or result.get("raw", {}).get("alpha_id")
+            or result.get("raw", {}).get("id")
+        )
+
+        if not alpha_id:
+            print(f"[SUBMIT_SKIP] run_id={run_id} reason=no_alpha_id_found")
+            return
+
+        try:
+            submission_response = self.client.submit_alpha(alpha_id)
+            self.storage.insert_submission(
+                submission_id=new_id("sub"),
+                candidate_id=candidate_id,
+                run_id=run_id,
+                submitted_at=utc_now(),
+                submission_status="submitted",
+                message=str(submission_response),
+            )
+            print(f"[SUBMITTED] run_id={run_id} alpha_id={alpha_id}")
+        except Exception as exc:
+            self.storage.insert_submission(
+                submission_id=new_id("sub"),
+                candidate_id=candidate_id,
+                run_id=run_id,
+                submitted_at=utc_now(),
+                submission_status="failed",
+                message=str(exc),
+            )
+            print(f"[SUBMIT_FAILED] run_id={run_id} alpha_id={alpha_id} error={exc}")
+
+    def _fill_capacity(self) -> None:
+        attempts = 0
+        max_attempts = 10
+
+        while self.scheduler.has_capacity() and attempts < max_attempts:
+            attempts += 1
+
+            candidate = self.generator.generate_candidate()
+
+            if self.storage.candidate_exists(candidate.expression_hash):
+                continue
+
+            try:
+                self.storage.insert_candidate(candidate)
+            except Exception as exc:
+                print(f"[CANDIDATE_INSERT_ERROR] candidate_id={candidate.candidate_id} error={exc}")
+                continue
+
+            run = Run.create(candidate_id=candidate.candidate_id, status="pending")
+            self.storage.insert_run(run)
+
+            try:
+                sim_id = self.client.submit_simulation(
+                    candidate.expression,
+                    candidate.settings.to_dict(),
+                )
+
+                now = utc_now()
+                self.storage.update_run(
+                    run.run_id,
+                    sim_id=sim_id,
+                    status="submitted",
+                    submitted_at=now,
+                )
+                self.scheduler.add(sim_id, run.run_id)
+
+                print(
+                    f"[SUBMITTED_SIM] run_id={run.run_id} sim_id={sim_id} "
+                    f"template={candidate.template_id} family={candidate.family} "
+                    f"expr={candidate.expression}"
+                )
+
+            except BrainAPIError as exc:
+                self.storage.update_run(
+                    run.run_id,
+                    status="failed",
+                    completed_at=utc_now(),
+                    error_message=str(exc),
+                )
+                print(f"[SIM_SUBMIT_ERROR] run_id={run.run_id} error={exc}")
+
+            except Exception as exc:
+                self.storage.update_run(
+                    run.run_id,
+                    status="failed",
+                    completed_at=utc_now(),
+                    error_message=str(exc),
+                )
+                print(f"[SIM_SUBMIT_UNEXPECTED] run_id={run.run_id} error={exc}")
+
+    def recover_running_from_storage(self) -> None:
+        """
+        Rebuild scheduler state from DB if bot restarts mid-run.
+        """
+        rows = self.storage.get_running_runs()
+        recovered = 0
+
+        for row in rows:
+            sim_id = row["sim_id"]
+            run_id = row["run_id"]
+
+            if sim_id and not self.scheduler.is_running(sim_id):
+                self.scheduler.add(sim_id, run_id)
+                recovered += 1
+
+        if recovered:
+            print(f"[RECOVERED] restored {recovered} running simulations from storage")
+
+    def mark_stale_runs_timed_out(self) -> None:
+        """
+        Optional safety cleanup for stale submitted/running runs.
+        """
+        cutoff = utc_now() - timedelta(minutes=config.SIM_TIMEOUT_MINUTES)
+        rows = self.storage.get_running_runs()
+
+        stale_count = 0
+        for row in rows:
+            submitted_at = row["submitted_at"]
+            if not submitted_at:
+                continue
+
+            try:
+                submitted_dt = self.storage.parse_dt(submitted_at)
+            except Exception:
+                continue
+
+            if submitted_dt < cutoff:
+                run_id = row["run_id"]
+                sim_id = row["sim_id"]
+                self.storage.update_run(
+                    run_id,
+                    status="timed_out",
+                    completed_at=utc_now(),
+                    error_message="Marked stale by timeout sweep.",
+                )
+                if sim_id:
+                    self.scheduler.remove(sim_id)
+                stale_count += 1
+
+        if stale_count:
+            print(f"[STALE_SWEEP] marked {stale_count} runs as timed_out")
+
+    def _print_progress_report(self) -> None:
+        print("\n[REPORT] recent family stats")
+        rows = self.storage.get_recent_family_stats(limit=500)
+
+        if not rows:
+            print("No completed family stats yet.\n")
+            return
+
+        for row in rows:
+            family = row["family"]
+            n_runs = row["n_runs"]
+            avg_sharpe = row["avg_sharpe"]
+            avg_fitness = row["avg_fitness"]
+            avg_turnover = row["avg_turnover"]
+            submit_rate = row["submit_rate"]
+
+            def fmt(x):
+                return "None" if x is None else f"{x:.3f}"
+
+            print(
+                f"family={family:<16} "
+                f"n={n_runs:<4} "
+                f"avg_sharpe={fmt(avg_sharpe):<8} "
+                f"avg_fitness={fmt(avg_fitness):<8} "
+                f"avg_turnover={fmt(avg_turnover):<8} "
+                f"submit_rate={fmt(submit_rate):<8}"
+            )
+        print()
