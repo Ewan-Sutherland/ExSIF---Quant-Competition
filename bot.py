@@ -182,28 +182,48 @@ class AlphaBot:
             )
             print(f"[SUBMIT_FAILED] run_id={run_id} alpha_id={alpha_id} error={exc}")
 
-    def _fill_capacity(self) -> None:
-        attempts = 0
-        max_attempts = 10
-
-        while self.scheduler.has_capacity() and attempts < max_attempts:
-            attempts += 1
-
-            candidate = None
-
+    def _get_candidate_with_refinement_priority(self):
+        """
+        Try refinement first a few times before falling back to random generation.
+        Only consume a refinement queue item once a non-duplicate mutation is found.
+        """
+        for _ in range(3):
             refinement_row = None
+
             if self.generator.rng.random() < config.REFINEMENT_PROBABILITY:
                 refinement_row = self.storage.get_next_refinement_candidate()
 
             if refinement_row is not None:
                 candidate = self.generator.mutate_candidate(refinement_row)
-                self.storage.mark_refinement_consumed(refinement_row["candidate_id"])
+
                 print(
                     f"[REFINING] base_candidate_id={refinement_row['candidate_id']} "
-                    f"template={refinement_row['template_id']} family={refinement_row['family']}"
+                    f"template={refinement_row['template_id']} family={refinement_row['family']} "
+                    f"new_template={candidate.template_id} new_family={candidate.family} "
+                    f"expr={candidate.expression}"
                 )
+
+                if not self.storage.candidate_exists(candidate.expression_hash):
+                    self.storage.mark_refinement_consumed(refinement_row["candidate_id"])
+                    return candidate
+
             else:
                 candidate = self.generator.generate_candidate()
+                if not self.storage.candidate_exists(candidate.expression_hash):
+                    return candidate
+
+        return None
+
+    def _fill_capacity(self) -> None:
+        attempts = 0
+        max_attempts = 12
+
+        while self.scheduler.has_capacity() and attempts < max_attempts:
+            attempts += 1
+
+            candidate = self._get_candidate_with_refinement_priority()
+            if candidate is None:
+                continue
 
             if self.storage.candidate_exists(candidate.expression_hash):
                 continue
