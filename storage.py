@@ -101,6 +101,21 @@ class Storage:
 
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS refinement_queue (
+                    candidate_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    priority REAL NOT NULL,
+                    reason TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    consumed INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id),
+                    FOREIGN KEY(run_id) REFERENCES runs(run_id)
+                );
+                """
+            )
+
+            conn.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_candidates_family
                 ON candidates(family);
                 """
@@ -124,6 +139,13 @@ class Storage:
                 """
                 CREATE INDEX IF NOT EXISTS idx_metrics_submit_eligible
                 ON metrics(submit_eligible);
+                """
+            )
+
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_refinement_consumed
+                ON refinement_queue(consumed, priority DESC);
                 """
             )
 
@@ -314,6 +336,72 @@ class Storage:
                     submission_status,
                     message,
                 ),
+            )
+
+    def add_refinement_candidate(
+        self,
+        candidate_id: str,
+        run_id: str,
+        priority: float,
+        reason: str,
+        created_at: datetime,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO refinement_queue (
+                    candidate_id,
+                    run_id,
+                    priority,
+                    reason,
+                    created_at,
+                    consumed
+                ) VALUES (?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    candidate_id,
+                    run_id,
+                    priority,
+                    reason,
+                    dt_to_str(created_at),
+                ),
+            )
+
+    def get_next_refinement_candidate(self):
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    rq.candidate_id,
+                    rq.run_id,
+                    rq.priority,
+                    rq.reason,
+                    c.template_id,
+                    c.family,
+                    c.params_json,
+                    c.settings_json,
+                    c.expression,
+                    c.canonical_expression,
+                    c.expression_hash
+                FROM refinement_queue rq
+                JOIN candidates c
+                    ON rq.candidate_id = c.candidate_id
+                WHERE rq.consumed = 0
+                ORDER BY rq.priority DESC, rq.created_at ASC
+                LIMIT 1
+                """
+            ).fetchone()
+            return row
+
+    def mark_refinement_consumed(self, candidate_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE refinement_queue
+                SET consumed = 1
+                WHERE candidate_id = ?
+                """,
+                (candidate_id,),
             )
 
     def get_running_runs(self) -> list[sqlite3.Row]:

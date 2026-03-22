@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Optional
 
 import config
 from evaluator import evaluate_submission, parse_metrics
@@ -28,12 +27,6 @@ class AlphaBot:
         self.completed_runs = 0
 
     def tick(self) -> None:
-        """
-        One loop iteration:
-        1. ensure session
-        2. poll current running sims
-        3. fill empty slots
-        """
         self.client.ensure_session()
         self._poll_running()
         self._fill_capacity()
@@ -106,14 +99,11 @@ class AlphaBot:
 
         candidate_id = run_row["candidate_id"]
 
-#        import json
-#        print("[DEBUG_COMPLETED_RAW]")
-#        print(json.dumps(result, indent=2, default=str))
-
         metrics = parse_metrics(run_id, result)
         self.storage.insert_metrics(metrics)
 
         decision = evaluate_submission(candidate_id, metrics)
+        self._maybe_queue_refinement(candidate_id, run_id, metrics)
 
         self.completed_runs += 1
 
@@ -132,6 +122,32 @@ class AlphaBot:
 
         if self.completed_runs % config.REPORT_EVERY_N_COMPLETIONS == 0:
             self._print_progress_report()
+
+    def _maybe_queue_refinement(self, candidate_id: str, run_id: str, metrics) -> None:
+        sharpe = metrics.sharpe
+        fitness = metrics.fitness
+        turnover = metrics.turnover
+
+        if sharpe is None or fitness is None:
+            return
+
+        if sharpe >= config.NEAR_PASSER_MIN_SHARPE and fitness >= config.NEAR_PASSER_MIN_FITNESS:
+            priority = float(sharpe) + float(fitness)
+
+            if turnover is not None:
+                priority -= max(0.0, turnover - config.NEAR_PASSER_MAX_TURNOVER)
+
+            self.storage.add_refinement_candidate(
+                candidate_id=candidate_id,
+                run_id=run_id,
+                priority=priority,
+                reason=metrics.fail_reason or "near_passer",
+                created_at=utc_now(),
+            )
+            print(
+                f"[QUEUED_REFINEMENT] run_id={run_id} candidate_id={candidate_id} "
+                f"priority={priority:.3f} reason={metrics.fail_reason}"
+            )
 
     def _attempt_submission(self, candidate_id: str, run_id: str, result: dict) -> None:
         alpha_id = (
@@ -173,7 +189,21 @@ class AlphaBot:
         while self.scheduler.has_capacity() and attempts < max_attempts:
             attempts += 1
 
-            candidate = self.generator.generate_candidate()
+            candidate = None
+
+            refinement_row = None
+            if self.generator.rng.random() < config.REFINEMENT_PROBABILITY:
+                refinement_row = self.storage.get_next_refinement_candidate()
+
+            if refinement_row is not None:
+                candidate = self.generator.mutate_candidate(refinement_row)
+                self.storage.mark_refinement_consumed(refinement_row["candidate_id"])
+                print(
+                    f"[REFINING] base_candidate_id={refinement_row['candidate_id']} "
+                    f"template={refinement_row['template_id']} family={refinement_row['family']}"
+                )
+            else:
+                candidate = self.generator.generate_candidate()
 
             if self.storage.candidate_exists(candidate.expression_hash):
                 continue
@@ -227,9 +257,6 @@ class AlphaBot:
                 print(f"[SIM_SUBMIT_UNEXPECTED] run_id={run.run_id} error={exc}")
 
     def recover_running_from_storage(self) -> None:
-        """
-        Rebuild scheduler state from DB if bot restarts mid-run.
-        """
         rows = self.storage.get_running_runs()
         recovered = 0
 
@@ -245,9 +272,6 @@ class AlphaBot:
             print(f"[RECOVERED] restored {recovered} running simulations from storage")
 
     def mark_stale_runs_timed_out(self) -> None:
-        """
-        Optional safety cleanup for stale submitted/running runs.
-        """
         cutoff = utc_now() - timedelta(minutes=config.SIM_TIMEOUT_MINUTES)
         rows = self.storage.get_running_runs()
 
