@@ -458,10 +458,39 @@ class Storage:
                 WHERE r.run_id IN (
                     SELECT run_id
                     FROM runs
-                    ORDER BY submitted_at DESC
+                    WHERE status = 'completed'
+                    ORDER BY completed_at DESC
                     LIMIT ?
                 )
                 GROUP BY c.family
+                ORDER BY n_runs DESC
+                """,
+                (limit,),
+            ).fetchall()
+            return rows
+
+    def get_recent_template_stats(self, limit: int = 180) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    c.template_id,
+                    c.family,
+                    COUNT(*) AS n_runs,
+                    AVG(m.sharpe) AS avg_sharpe,
+                    AVG(m.fitness) AS avg_fitness,
+                    AVG(m.turnover) AS avg_turnover
+                FROM metrics m
+                JOIN runs r ON m.run_id = r.run_id
+                JOIN candidates c ON r.candidate_id = c.candidate_id
+                WHERE r.run_id IN (
+                    SELECT run_id
+                    FROM runs
+                    WHERE status = 'completed'
+                    ORDER BY completed_at DESC
+                    LIMIT ?
+                )
+                GROUP BY c.template_id, c.family
                 ORDER BY n_runs DESC
                 """,
                 (limit,),

@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import json
 import random
 from typing import Any
@@ -10,13 +9,13 @@ from models import Candidate, SimulationSettings
 from templates import FUNDAMENTAL_FIELDS, SAFE_PARAM_RANGES, TEMPLATE_LIBRARY
 
 
-FAMILY_WEIGHTS = {
-    "mean_reversion": 4.5,
-    "momentum": 0.2,
-    "volume_flow": 3.5,
-    "vol_adjusted": 0.3,
-    "fundamental": 0.05,
-    "conditional": 2.5,
+BASE_FAMILY_WEIGHTS = {
+    "mean_reversion": 4.8,
+    "momentum": 0.01,
+    "volume_flow": 1.8,
+    "vol_adjusted": 0.6,
+    "fundamental": 0.01,
+    "conditional": 1.9,
 }
 
 
@@ -24,282 +23,180 @@ class AlphaGenerator:
     def __init__(self, seed: int | None = None):
         self.rng = random.Random(seed)
 
-    def generate_candidate(self) -> Candidate:
-        family = self._sample_family_weighted()
-        template_entry = self.rng.choice(TEMPLATE_LIBRARY[family])
+    # ============================
+    # PUBLIC
+    # ============================
 
-        params = self._sample_params(template_entry["expression"])
-        expression, fields_used = self._render_expression(
-            template_entry["expression"],
-            params,
-        )
+    def generate_candidate(self, family_bias=None, template_bias=None):
+        family = self._sample_family(family_bias)
+        template = self._sample_template(family, template_bias)
 
-        settings = self._sample_settings()
-        canonical_expression = canonicalize_expression(expression)
-        expression_hash = hash_candidate(canonical_expression, settings.to_dict())
+        params = self._sample_params(template["expression"])
+        expr, fields = self._render(template["expression"], params)
+
+        expr = self._post_process(expr)
+
+        settings = self._sample_settings(family)
+        canon = canonicalize_expression(expr)
+        h = hash_candidate(canon, settings.to_dict())
 
         return Candidate.create(
-            expression=expression,
-            canonical_expression=canonical_expression,
-            expression_hash=expression_hash,
-            template_id=template_entry["template_id"],
+            expression=expr,
+            canonical_expression=canon,
+            expression_hash=h,
+            template_id=template["template_id"],
             family=family,
-            fields=fields_used,
+            fields=fields,
             params=params,
             settings=settings,
         )
 
-    def mutate_candidate(self, base_row) -> Candidate:
-        family = base_row["family"]
-        template_id = base_row["template_id"]
+    def mutate_candidate(self, row):
+        family = row["family"]
+        template_id = row["template_id"]
 
-        template_entry = None
-        for entry in TEMPLATE_LIBRARY[family]:
-            if entry["template_id"] == template_id:
-                template_entry = entry
-                break
-
-        if template_entry is None:
+        template = next(
+            (t for t in TEMPLATE_LIBRARY[family] if t["template_id"] == template_id),
+            None,
+        )
+        if template is None:
             return self.generate_candidate()
 
-        params = json.loads(base_row["params_json"])
-        settings_dict = json.loads(base_row["settings_json"])
+        params = json.loads(row["params_json"])
+        settings = json.loads(row["settings_json"])
 
-        mutated_params = self._mutate_params_by_family(
-            family=family,
-            params=params,
-            template=template_entry["expression"],
-        )
-        mutated_settings = self._mutate_settings_by_family(
-            family=family,
-            settings=settings_dict,
-        )
+        params = self._mutate_params(params, template["expression"])
+        settings = self._mutate_settings(settings)
 
-        expression, fields_used = self._render_expression(
-            template_entry["expression"],
-            mutated_params,
-        )
+        expr, fields = self._render(template["expression"], params)
+        expr = self._post_process(expr, light=True)
 
-        settings = SimulationSettings(**mutated_settings)
-        canonical_expression = canonicalize_expression(expression)
-        expression_hash = hash_candidate(canonical_expression, settings.to_dict())
+        sim = SimulationSettings(**settings)
+        canon = canonicalize_expression(expr)
+        h = hash_candidate(canon, sim.to_dict())
 
         return Candidate.create(
-            expression=expression,
-            canonical_expression=canonical_expression,
-            expression_hash=expression_hash,
-            template_id=template_entry["template_id"],
+            expression=expr,
+            canonical_expression=canon,
+            expression_hash=h,
+            template_id=template_id,
             family=family,
-            fields=fields_used,
-            params=mutated_params,
-            settings=settings,
+            fields=fields,
+            params=params,
+            settings=sim,
         )
 
-    def _sample_family_weighted(self) -> str:
-        families = list(TEMPLATE_LIBRARY.keys())
-        weights = [FAMILY_WEIGHTS.get(f, 1.0) for f in families]
-        return self.rng.choices(families, weights=weights, k=1)[0]
+    # ============================
+    # SAMPLING
+    # ============================
 
-    def _sample_params(self, template: str) -> dict[str, Any]:
-        params: dict[str, Any] = {}
+    def _sample_family(self, bias):
+        fams = list(TEMPLATE_LIBRARY.keys())
+        weights = []
 
+        for f in fams:
+            w = BASE_FAMILY_WEIGHTS.get(f, 1.0)
+            if bias:
+                w *= bias.get(f, 1.0)
+            weights.append(max(w, 0.001))
+
+        return self.rng.choices(fams, weights=weights, k=1)[0]
+
+    def _sample_template(self, family, bias):
+        templates = TEMPLATE_LIBRARY[family]
+
+        if not bias:
+            return self.rng.choice(templates)
+
+        weights = [
+            max(bias.get(t["template_id"], 1.0), 0.001) for t in templates
+        ]
+        return self.rng.choices(templates, weights=weights, k=1)[0]
+
+    # ============================
+    # POST PROCESSING (FIXED)
+    # ============================
+
+    def _post_process(self, expr, light=False):
+        # Light smoothing only
+        if self.rng.random() < (0.2 if not light else 0.1):
+            if not expr.startswith("ts_mean"):
+                w = self.rng.choice([3, 5, 10])
+                expr = f"ts_mean(rank({expr}), {w})"
+
+        # Optional outer rank
+        if self.rng.random() < 0.1:
+            if not expr.startswith("rank("):
+                expr = f"rank({expr})"
+
+        return expr
+
+    # ============================
+    # PARAMS
+    # ============================
+
+    def _grid(self, key):
+        desired = [3, 5, 10, 20, 40, 60]
+        allowed = SAFE_PARAM_RANGES.get(key, desired)
+        return [x for x in desired if x in allowed] or list(allowed)
+
+    def _sample_params(self, template):
+        p = {}
         if "{n}" in template:
-            params["n"] = self.rng.choice(SAFE_PARAM_RANGES["n"])
-
+            p["n"] = self.rng.choice(self._grid("n"))
         if "{m}" in template:
-            params["m"] = self.rng.choice(SAFE_PARAM_RANGES["m"])
-
+            p["m"] = self.rng.choice(self._grid("m"))
         if "{field}" in template:
-            params["field"] = self.rng.choice(FUNDAMENTAL_FIELDS)
+            p["field"] = self.rng.choice(FUNDAMENTAL_FIELDS)
+        return p
 
-        return params
+    def _mutate_params(self, params, template):
+        out = dict(params)
+        grid = self._grid("n")
 
-    def _mutate_params_by_family(
-        self,
-        family: str,
-        params: dict[str, Any],
-        template: str,
-    ) -> dict[str, Any]:
-        mutated = dict(params)
+        if "n" in out:
+            out["n"] = self._mutate(out["n"], grid)
 
-        if family == "mean_reversion":
-            if "{n}" in template and "n" in mutated:
-                mutated["n"] = self._mutate_from_grid(
-                    current=mutated["n"],
-                    grid=[5, 10, 20, 40],
-                    stay_prob=0.35,
-                )
-            if "{m}" in template and "m" in mutated:
-                mutated["m"] = self._mutate_from_grid(
-                    current=mutated["m"],
-                    grid=[10, 20, 60],
-                    stay_prob=0.35,
-                )
+        if "m" in out:
+            out["m"] = self._mutate(out["m"], grid)
 
-        elif family == "volume_flow":
-            if "{n}" in template and "n" in mutated:
-                mutated["n"] = self._mutate_from_grid(
-                    current=mutated["n"],
-                    grid=[10, 20, 40, 60],
-                    stay_prob=0.20,
-                )
-            if "{m}" in template and "m" in mutated:
-                mutated["m"] = self._mutate_from_grid(
-                    current=mutated["m"],
-                    grid=[20, 60],
-                    stay_prob=0.20,
-                )
+        if "field" in out and self.rng.random() < 0.1:
+            out["field"] = self.rng.choice(FUNDAMENTAL_FIELDS)
 
-        elif family == "conditional":
-            if "{n}" in template and "n" in mutated:
-                mutated["n"] = self._mutate_from_grid(
-                    current=mutated["n"],
-                    grid=[5, 10, 20, 40],
-                    stay_prob=0.30,
-                )
-            if "{m}" in template and "m" in mutated:
-                mutated["m"] = self._mutate_from_grid(
-                    current=mutated["m"],
-                    grid=[10, 20, 40, 60],
-                    stay_prob=0.30,
-                )
+        return out
 
-        elif family == "vol_adjusted":
-            if "{n}" in template and "n" in mutated:
-                mutated["n"] = self._mutate_from_grid(
-                    current=mutated["n"],
-                    grid=[5, 10, 20, 40, 60],
-                    stay_prob=0.25,
-                )
-            if "{m}" in template and "m" in mutated:
-                mutated["m"] = self._mutate_from_grid(
-                    current=mutated["m"],
-                    grid=[10, 20, 60],
-                    stay_prob=0.25,
-                )
-
-        elif family == "momentum":
-            if "{n}" in template and "n" in mutated:
-                mutated["n"] = self._mutate_from_grid(
-                    current=mutated["n"],
-                    grid=[5, 10, 20, 40, 60],
-                    stay_prob=0.25,
-                )
-            if "{m}" in template and "m" in mutated:
-                mutated["m"] = self._mutate_from_grid(
-                    current=mutated["m"],
-                    grid=[10, 20, 60],
-                    stay_prob=0.25,
-                )
-
-        elif family == "fundamental":
-            if "{n}" in template and "n" in mutated:
-                mutated["n"] = self._mutate_from_grid(
-                    current=mutated["n"],
-                    grid=[5, 10, 20, 40, 60],
-                    stay_prob=0.25,
-                )
-            if "{field}" in template and "field" in mutated and self.rng.random() < 0.20:
-                mutated["field"] = self.rng.choice(FUNDAMENTAL_FIELDS)
-
-        return mutated
-
-    def _mutate_settings_by_family(
-        self,
-        family: str,
-        settings: dict[str, Any],
-    ) -> dict[str, Any]:
-        mutated = dict(settings)
-
-        if family == "mean_reversion":
-            if "decay" in mutated:
-                mutated["decay"] = self._mutate_from_grid(
-                    current=mutated["decay"],
-                    grid=[2, 4, 6],
-                    stay_prob=0.35,
-                )
-            if "neutralization" in mutated and self.rng.random() < 0.30:
-                mutated["neutralization"] = self.rng.choice(config.DEFAULT_NEUTRALIZATIONS)
-
-        elif family == "volume_flow":
-            if "decay" in mutated:
-                mutated["decay"] = self._mutate_from_grid(
-                    current=mutated["decay"],
-                    grid=[4, 6],
-                    stay_prob=0.25,
-                )
-            if "neutralization" in mutated and self.rng.random() < 0.25:
-                mutated["neutralization"] = self.rng.choice(config.DEFAULT_NEUTRALIZATIONS)
-
-        elif family == "conditional":
-            if "decay" in mutated:
-                mutated["decay"] = self._mutate_from_grid(
-                    current=mutated["decay"],
-                    grid=[2, 4, 6],
-                    stay_prob=0.30,
-                )
-            if "neutralization" in mutated and self.rng.random() < 0.40:
-                mutated["neutralization"] = self.rng.choice(config.DEFAULT_NEUTRALIZATIONS)
-
-        else:
-            if "decay" in mutated:
-                mutated["decay"] = self._mutate_from_grid(
-                    current=mutated["decay"],
-                    grid=config.DEFAULT_DECAYS,
-                    stay_prob=0.25,
-                )
-            if "neutralization" in mutated and self.rng.random() < 0.20:
-                mutated["neutralization"] = self.rng.choice(config.DEFAULT_NEUTRALIZATIONS)
-
-        if "truncation" in mutated and self.rng.random() < 0.10:
-            mutated["truncation"] = self.rng.choice(config.DEFAULT_TRUNCATIONS)
-
-        return mutated
-
-    def _mutate_from_grid(
-        self,
-        current: Any,
-        grid: list[Any],
-        stay_prob: float = 0.25,
-    ) -> Any:
-        if current not in grid:
+    def _mutate(self, val, grid):
+        if val not in grid:
             return self.rng.choice(grid)
 
-        if self.rng.random() < stay_prob:
-            return current
+        if self.rng.random() < 0.4:
+            return val
 
-        idx = grid.index(current)
-        candidates = []
+        i = grid.index(val)
+        choices = []
+        if i > 0:
+            choices.append(grid[i - 1])
+        if i < len(grid) - 1:
+            choices.append(grid[i + 1])
 
-        if idx > 0:
-            candidates.append(grid[idx - 1])
-        if idx < len(grid) - 1:
-            candidates.append(grid[idx + 1])
+        return self.rng.choice(choices or [val])
 
-        if not candidates:
-            return current
+    # ============================
+    # SETTINGS
+    # ============================
 
-        return self.rng.choice(candidates)
+    def _mutate_settings(self, s):
+        out = dict(s)
 
-    def _render_expression(
-        self,
-        template: str,
-        params: dict[str, Any],
-    ) -> tuple[str, list[str]]:
-        expression = template.format(**params)
+        if "decay" in out:
+            out["decay"] = self._mutate(out["decay"], config.DEFAULT_DECAYS)
 
-        fields_used: list[str] = []
-        for field_name in ("field",):
-            if field_name in params:
-                fields_used.append(str(params[field_name]))
+        if "neutralization" in out and self.rng.random() < 0.2:
+            out["neutralization"] = self.rng.choice(config.DEFAULT_NEUTRALIZATIONS)
 
-        for implicit_field in ("close", "returns", "volume"):
-            if implicit_field in expression and implicit_field not in fields_used:
-                fields_used.append(implicit_field)
+        return out
 
-        return expression, fields_used
-
-    def _sample_settings(self) -> SimulationSettings:
+    def _sample_settings(self, family):
         return SimulationSettings(
             region=config.DEFAULT_REGION,
             universe=self.rng.choice(config.DEFAULT_UNIVERSES),
@@ -313,3 +210,21 @@ class AlphaGenerator:
             max_stock_weight=config.DEFAULT_MAX_STOCK_WEIGHT,
             language=config.DEFAULT_LANGUAGE,
         )
+
+    # ============================
+    # RENDER
+    # ============================
+
+    def _render(self, template, params):
+        expr = template.format(**params)
+        fields = []
+
+        for k in ["field"]:
+            if k in params:
+                fields.append(params[k])
+
+        for f in ["close", "returns", "volume"]:
+            if f in expr and f not in fields:
+                fields.append(f)
+
+        return expr, fields
