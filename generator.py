@@ -10,13 +10,13 @@ from models import Candidate, SimulationSettings
 from templates import FUNDAMENTAL_FIELDS, SAFE_PARAM_RANGES, TEMPLATE_LIBRARY
 
 
-BASE_FAMILY_WEIGHTS = {
-    "mean_reversion": 4.8,
+DEFAULT_BASE_FAMILY_WEIGHTS = {
+    "mean_reversion": 4.6,
     "momentum": 0.01,
-    "volume_flow": 1.8,
-    "vol_adjusted": 0.6,
-    "fundamental": 0.01,
-    "conditional": 1.9,
+    "volume_flow": 1.9,
+    "vol_adjusted": 0.8,
+    "fundamental": 0.02,
+    "conditional": 1.8,
 }
 
 
@@ -34,7 +34,7 @@ class AlphaGenerator:
 
         params = self._sample_params(template["expression"])
         expr, fields = self._render(template["expression"], params)
-        expr = self._post_process(expr)
+        expr = self._post_process(expr, family=family, template_id=template["template_id"], light=False)
 
         settings = self._sample_settings(family)
         canon = canonicalize_expression(expr)
@@ -63,14 +63,20 @@ class AlphaGenerator:
         if template is None:
             return self.generate_candidate()
 
-        params = json.loads(row["params_json"])
-        settings = json.loads(row["settings_json"])
+        params = self._json_or_dict(row["params_json"])
+        settings = self._json_or_dict(row["settings_json"])
+        metrics_hint = metrics_hint or {}
 
         mode = self._refinement_mode(reason=reason, metrics_hint=metrics_hint)
-        chosen_template = self._choose_refinement_template(family, template_id, mode)
+        chosen_template = self._choose_refinement_template(
+            family=family,
+            template_id=template_id,
+            mode=mode,
+            metrics_hint=metrics_hint,
+        )
 
-        params = self._mutate_params_for_mode(params, chosen_template["expression"], mode)
-        settings = self._mutate_settings_for_mode(settings, family=family, mode=mode)
+        params = self._mutate_params_for_mode(params, chosen_template["expression"], mode, metrics_hint=metrics_hint)
+        settings = self._mutate_settings(settings, mode=mode)
 
         expr, fields = self._render(chosen_template["expression"], params)
         expr = self._apply_refinement_variants(
@@ -79,9 +85,12 @@ class AlphaGenerator:
             template_id=chosen_template["template_id"],
             params=params,
             mode=mode,
+            metrics_hint=metrics_hint,
         )
         expr = self._post_process(
             expr,
+            family=family,
+            template_id=chosen_template["template_id"],
             light=True,
             force_smoothing=(mode in {"fitness", "turnover"}),
         )
@@ -107,158 +116,210 @@ class AlphaGenerator:
 
     def _sample_family(self, bias):
         fams = list(TEMPLATE_LIBRARY.keys())
+        if hasattr(config, "DEFAULT_FAMILY_ORDER"):
+            ordered = [f for f in config.DEFAULT_FAMILY_ORDER if f in TEMPLATE_LIBRARY]
+            fams = ordered + [f for f in fams if f not in ordered]
+
+        config_weights = getattr(config, "FAMILY_BASE_WEIGHTS", {})
         weights = []
 
         for fam in fams:
-            w = BASE_FAMILY_WEIGHTS.get(fam, 1.0)
+            base = DEFAULT_BASE_FAMILY_WEIGHTS.get(fam, 1.0)
+            if fam in config_weights:
+                base *= float(config_weights[fam])
             if bias:
-                w *= bias.get(fam, 1.0)
-            weights.append(max(w, 0.001))
+                base *= bias.get(fam, 1.0)
+            weights.append(max(base, 0.001))
 
         return self.rng.choices(fams, weights=weights, k=1)[0]
 
     def _sample_template(self, family, bias):
         templates = TEMPLATE_LIBRARY[family]
-        filtered = []
-        weights = []
+        base_boosts = getattr(config, "TEMPLATE_BASE_WEIGHTS", {})
+        preferred_boosts = getattr(config, "PREFERRED_TEMPLATE_BOOSTS", {})
+        penalties = getattr(config, "TEMPLATE_WEIGHT_PENALTIES", {})
 
+        weights = []
         for t in templates:
             tid = t["template_id"]
-
-            if tid in getattr(config, "DISABLED_FRESH_TEMPLATES", set()):
-                continue
-
-            if tid in getattr(config, "SOFT_BLOCK_FRESH_TEMPLATES", set()):
-                if self.rng.random() > getattr(config, "SOFT_BLOCK_FRESH_PROB", 0.10):
-                    continue
-
-            if tid in getattr(config, "TINY_EXPLORATION_TEMPLATES", set()):
-                if self.rng.random() > getattr(config, "TINY_EXPLORATION_PROB", 0.03):
-                    continue
-
-            w = 1.0 if not bias else max(bias.get(tid, 1.0), 0.001)
-            w *= getattr(config, "PREFERRED_TEMPLATE_BOOSTS", {}).get(tid, 1.0)
-            w *= getattr(config, "TEMPLATE_WEIGHT_PENALTIES", {}).get(tid, 1.0)
-
-            if w <= 0.0:
-                continue
-
-            filtered.append(t)
+            w = 1.0
+            w *= base_boosts.get(tid, 1.0)
+            w *= preferred_boosts.get(tid, 1.0)
+            w *= penalties.get(tid, 1.0)
+            if bias:
+                w *= bias.get(tid, 1.0)
             weights.append(max(w, 0.001))
 
-        if not filtered:
-            return self.rng.choice(templates)
-
-        return self.rng.choices(filtered, weights=weights, k=1)[0]
+        return self.rng.choices(templates, weights=weights, k=1)[0]
 
     # ============================
-    # REFINEMENT MODES / TEMPLATE SWITCHING
+    # REFINEMENT
     # ============================
 
-    def _refinement_mode(self, reason: str, metrics_hint: dict[str, Any] | None = None) -> str:
+    def _refinement_mode(self, reason: str, metrics_hint: dict[str, Any] | None) -> str:
         txt = (reason or "").upper()
-        if metrics_hint:
-            turnover = metrics_hint.get("turnover")
-            fitness = metrics_hint.get("fitness")
-            sharpe = metrics_hint.get("sharpe")
-            try:
-                if turnover is not None and float(turnover) >= getattr(config, "MAX_TURNOVER", 0.70):
-                    return "turnover"
-            except Exception:
-                pass
-            try:
-                if fitness is not None and float(fitness) < getattr(config, "MIN_FITNESS", 1.00):
-                    return "fitness"
-            except Exception:
-                pass
-            try:
-                if sharpe is not None and float(sharpe) < getattr(config, "MIN_SHARPE", 1.25):
-                    return "sharpe"
-            except Exception:
-                pass
+
         if "LOW_FITNESS" in txt:
             return "fitness"
         if "HIGH_TURNOVER" in txt:
             return "turnover"
         if "LOW_SHARPE" in txt:
             return "sharpe"
+
+        if metrics_hint:
+            turnover = self._safe_float(metrics_hint.get("turnover"))
+            sharpe = self._safe_float(metrics_hint.get("sharpe"))
+            fitness = self._safe_float(metrics_hint.get("fitness"))
+
+            if turnover is not None and turnover > 0.60:
+                return "turnover"
+            if fitness is not None and fitness < config.MIN_FITNESS:
+                return "fitness"
+            if sharpe is not None and sharpe < config.MIN_SHARPE:
+                return "sharpe"
+
         return "general"
 
-    def _choose_refinement_template(self, family: str, template_id: str, mode: str) -> dict[str, str]:
+    def _choose_refinement_template(
+        self,
+        family: str,
+        template_id: str,
+        mode: str,
+        metrics_hint: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
         templates = TEMPLATE_LIBRARY[family]
         current = next((t for t in templates if t["template_id"] == template_id), templates[0])
-        sisters = [t for t in templates if t["template_id"] != template_id]
 
+        elite_templates = set(getattr(config, "ELITE_TEMPLATES", set()))
+        stay_prob = 0.0
+        if current["template_id"] in elite_templates:
+            if mode == "turnover":
+                stay_prob = getattr(config, "REFINEMENT_ELITE_TURNOVER_STAY_PROB", 0.97)
+            elif mode == "fitness":
+                stay_prob = getattr(config, "REFINEMENT_ELITE_FITNESS_STAY_PROB", 0.95)
+            elif mode == "sharpe":
+                stay_prob = getattr(config, "REFINEMENT_ELITE_SHARPE_STAY_PROB", 0.82)
+            else:
+                stay_prob = getattr(config, "REFINEMENT_ELITE_STAY_PROB", 0.90)
+
+            sharpe = self._safe_float((metrics_hint or {}).get("sharpe"))
+            fitness = self._safe_float((metrics_hint or {}).get("fitness"))
+            turnover = self._safe_float((metrics_hint or {}).get("turnover"))
+
+            if mode == "fitness" and turnover is not None and turnover <= config.MAX_TURNOVER:
+                stay_prob = max(stay_prob, 0.97)
+            if mode == "sharpe" and fitness is not None and fitness >= config.MIN_FITNESS:
+                stay_prob = max(stay_prob, 0.92)
+            if sharpe is not None and sharpe >= 1.45 and current["template_id"] in elite_templates:
+                stay_prob = max(stay_prob, 0.94)
+
+            if self.rng.random() < stay_prob:
+                return current
+
+        sisters = [t for t in templates if t["template_id"] != template_id]
         if not sisters:
             return current
 
-        switch_prob = getattr(config, "REFINEMENT_TEMPLATE_SWITCH_PROB", 0.30)
-        if mode == "sharpe":
-            switch_prob += 0.10
-        elif mode in {"fitness", "turnover"}:
-            switch_prob += 0.05
+        switch_prob = getattr(config, "REFINEMENT_TEMPLATE_SWITCH_PROB", 0.12)
+        if current["template_id"] in elite_templates:
+            if mode in {"fitness", "turnover"}:
+                switch_prob *= 0.45
+            elif mode == "sharpe":
+                switch_prob *= 0.70
 
         if self.rng.random() >= switch_prob:
             return current
 
-        weights: list[float] = []
+        filtered = []
+        weights = []
+        disabled = set(getattr(config, "DISABLED_REFINEMENT_TEMPLATES", set()))
+
         for t in sisters:
             tid = t["template_id"]
+
+            if tid in disabled:
+                continue
+
+            if tid in getattr(config, "SOFT_BLOCK_REFINEMENT_TEMPLATES", set()):
+                if self.rng.random() > getattr(config, "SOFT_BLOCK_REFINEMENT_PROB", 0.08):
+                    continue
+
             w = 1.0
+
             if family == "mean_reversion":
-                if mode in {"fitness", "turnover"} and tid in {"mr_04", "mr_01"}:
-                    w = 1.35
-                elif mode == "sharpe" and tid in {"mr_02", "mr_03", "mr_04"}:
+                if current["template_id"] == "mr_04":
+                    if tid == "mr_01":
+                        w = 0.92
+                    elif tid == "mr_02":
+                        w = 0.58
+                    elif tid == "mr_03":
+                        w = 0.68
+                elif current["template_id"] in {"mr_01", "mr_02", "mr_03"} and tid == "mr_04":
+                    w = 1.50
+                elif tid == "mr_04":
                     w = 1.25
+            elif family == "conditional":
+                if current["template_id"] == "cond_01":
+                    if tid == "cond_02":
+                        w = 0.20
+                    elif tid == "cond_03":
+                        w = 0.02
+                elif tid == "cond_01":
+                    w = 1.35
             elif family == "volume_flow":
-                if mode == "turnover" and tid in {"vol_01", "vol_02"}:
-                    w = 1.35
-                elif mode == "fitness" and tid == "vol_03":
-                    w = 1.25
+                if tid == "vol_03":
+                    w = 1.28
+                elif tid == "vol_01":
+                    w = 0.78
+                elif tid == "vol_02":
+                    w = 0.00
             elif family == "vol_adjusted":
                 if tid == "va_02":
-                    w = 1.40
+                    w = 1.30
                 elif tid == "va_01":
-                    w = 0.50
-            elif family == "conditional":
-                if tid == "cond_03":
-                    w = 0.15
-                elif mode in {"fitness", "turnover"} and tid in {"cond_01", "cond_02"}:
-                    w = 1.25
-            weights.append(w)
+                    w = 0.10
 
-        return self.rng.choices(sisters, weights=weights, k=1)[0]
+            if mode == "fitness":
+                if tid in {"mr_04", "cond_01", "vol_03", "va_02"}:
+                    w *= 1.15
+            elif mode == "turnover":
+                if tid in {"mr_04", "cond_01", "va_02"}:
+                    w *= 1.12
+            elif mode == "sharpe":
+                if tid in {"mr_04", "cond_01", "vol_03"}:
+                    w *= 1.08
+
+            filtered.append(t)
+            weights.append(max(w, 0.001))
+
+        if not filtered:
+            return current
+
+        return self.rng.choices(filtered, weights=weights, k=1)[0]
 
     # ============================
     # POST PROCESSING
     # ============================
 
-    def _post_process(self, expr: str, light: bool = False, force_smoothing: bool = False) -> str:
-        smooth_prob = getattr(config, "FRESH_FORCE_SMOOTH_PROB", 0.78) if not light else 0.35
+    def _post_process(self, expr, family=None, template_id=None, light=False, force_smoothing: bool = False):
+        if expr.count("rank(") >= 3 or expr.count("ts_mean(") >= 3:
+            return expr
+
         if force_smoothing:
-            smooth_prob = max(smooth_prob, 0.92)
+            smoothing_prob = 0.45
+        elif light:
+            smoothing_prob = getattr(config, "LIGHT_POST_PROCESS_SMOOTH_PROB", 0.30)
+        else:
+            smoothing_prob = getattr(config, "FRESH_FORCE_SMOOTH_PROB", 0.72)
 
-        if self.rng.random() < smooth_prob and not expr.startswith("ts_mean"):
-            w = self.rng.choice(getattr(config, "REFINEMENT_SMOOTHING_WINDOWS", [3, 5, 10]))
-            if self.rng.random() < 0.75:
-                expr = f"ts_mean(rank({expr}), {w})"
-            else:
-                expr = f"rank(ts_mean({expr}, {w}))"
+        if self.rng.random() < smoothing_prob and not expr.startswith("ts_mean("):
+            win_choices = getattr(config, "PREFER_TS_MEAN_WINDOW", [3, 5])
+            win = self.rng.choice(win_choices if light else [3, 5, 10])
+            expr = f"ts_mean(rank({expr}), {win})"
 
-        raw_rank_prob = getattr(config, "FRESH_RAW_RANK_PROB", 0.01) if not light else 0.02
-        if self.rng.random() < raw_rank_prob:
-            if not expr.startswith("rank("):
-                expr = f"rank({expr})"
-
-        # suppress weak fresh/reactive raw forms
-        weak_raw = (
-            expr.startswith("rank(-ts_delta(")
-            or expr.startswith("rank(ts_mean(close,")
-            or expr.startswith("rank(-(close / ts_mean(")
-            or expr.startswith("rank((volume / ts_mean(")
-        )
-        if weak_raw:
-            expr = f"ts_mean(rank({expr}), 5)"
+        rank_prob = getattr(config, "FRESH_RAW_RANK_PROB", 0.02) if not light else 0.05
+        if self.rng.random() < rank_prob and not expr.startswith("rank("):
+            expr = f"rank({expr})"
 
         return expr
 
@@ -266,13 +327,13 @@ class AlphaGenerator:
     # PARAMS
     # ============================
 
-    def _grid(self, key: str):
+    def _grid(self, key):
         desired = [3, 5, 10, 20, 40, 60]
         allowed = SAFE_PARAM_RANGES.get(key, desired)
         return [x for x in desired if x in allowed] or list(allowed)
 
-    def _sample_params(self, template: str):
-        p: dict[str, Any] = {}
+    def _sample_params(self, template):
+        p = {}
         if "{n}" in template:
             p["n"] = self.rng.choice(self._grid("n"))
         if "{m}" in template:
@@ -281,69 +342,112 @@ class AlphaGenerator:
             p["field"] = self.rng.choice(FUNDAMENTAL_FIELDS)
         return p
 
-    def _mutate_params_for_mode(self, params: dict[str, Any], template: str, mode: str) -> dict[str, Any]:
+    def _mutate_params_for_mode(self, params, template, mode: str, metrics_hint: dict[str, Any] | None = None):
         out = dict(params)
-        grid = self._grid("n")
+        grid_n = self._grid("n")
+        grid_m = self._grid("m")
 
         if "n" in out:
             if mode == "turnover":
-                out["n"] = self._push_param_wider(out["n"], grid)
+                out["n"] = self._push_param_wider(out["n"], grid_n)
             elif mode == "fitness":
-                if self.rng.random() < 0.65:
-                    out["n"] = self._push_param_wider(out["n"], grid)
-                else:
-                    out["n"] = self._mutate_neighbor(out["n"], grid)
+                out["n"] = self._mutate(out["n"], grid_n, stay_prob=0.15)
             elif mode == "sharpe":
-                out["n"] = self._mutate_neighbor(out["n"], grid)
+                out["n"] = self._mutate(out["n"], grid_n, stay_prob=0.10)
             else:
-                out["n"] = self._mutate_neighbor(out["n"], grid)
+                out["n"] = self._mutate(out["n"], grid_n, stay_prob=0.25)
+
+        if "{n}" in template and "n" not in out:
+            out["n"] = self.rng.choice(grid_n)
 
         if "m" in out:
-            m_grid = self._grid("m")
-            if mode in {"fitness", "turnover"}:
-                out["m"] = self._push_param_wider(out["m"], m_grid)
+            if mode == "turnover":
+                out["m"] = self._push_param_wider(out["m"], grid_m)
             else:
-                out["m"] = self._mutate_neighbor(out["m"], m_grid)
+                out["m"] = self._mutate(out["m"], grid_m, stay_prob=0.20)
 
-        if "field" in out and self.rng.random() < 0.10:
+        if "{m}" in template and "m" not in out:
+            out["m"] = self.rng.choice(grid_m)
+
+        if "field" in out and self.rng.random() < 0.12:
+            out["field"] = self.rng.choice(FUNDAMENTAL_FIELDS)
+
+        if "{field}" in template and "field" not in out:
             out["field"] = self.rng.choice(FUNDAMENTAL_FIELDS)
 
         return out
 
-    def _mutate_neighbor(self, val, grid):
+    def _mutate(self, val, grid, stay_prob: float = 0.35):
         if val not in grid:
             return self.rng.choice(grid)
-        if self.rng.random() < 0.35:
+
+        if self.rng.random() < stay_prob:
             return val
-        idx = grid.index(val)
+
+        i = grid.index(val)
         choices = [val]
-        if idx > 0:
-            choices.append(grid[idx - 1])
-        if idx < len(grid) - 1:
-            choices.append(grid[idx + 1])
+        if i > 0:
+            choices.append(grid[i - 1])
+        if i < len(grid) - 1:
+            choices.append(grid[i + 1])
+
+        if self.rng.random() < 0.25 and i > 1:
+            choices.append(grid[i - 2])
+        if self.rng.random() < 0.25 and i < len(grid) - 2:
+            choices.append(grid[i + 2])
+
         return self.rng.choice(choices)
 
     def _push_param_wider(self, val, grid=None):
-        grid = grid or self._grid("n")
+        grid = grid or [3, 5, 10, 20, 40, 60]
         if val not in grid:
             return self.rng.choice(grid)
-        idx = grid.index(val)
-        choices = [val]
-        if idx < len(grid) - 1:
-            choices.append(grid[idx + 1])
-        if idx < len(grid) - 2:
-            choices.append(grid[idx + 2])
-        return self.rng.choice(choices)
+        i = grid.index(val)
+        if i >= len(grid) - 1:
+            return val
+        if i == len(grid) - 2:
+            return grid[-1]
+        return self.rng.choice(grid[i + 1 : min(len(grid), i + 3)])
+
+    def _push_param_narrower(self, val, grid=None):
+        grid = grid or [3, 5, 10, 20, 40, 60]
+        if val not in grid:
+            return self.rng.choice(grid)
+        i = grid.index(val)
+        if i <= 0:
+            return val
+        lo = max(0, i - 2)
+        return self.rng.choice(grid[lo:i])
 
     # ============================
     # SETTINGS
     # ============================
 
-    def _sample_settings(self, family: str):
+    def _mutate_settings(self, s, mode: str = "general"):
+        out = dict(s)
+
+        if "decay" in out:
+            decay_grid = list(config.DEFAULT_DECAYS)
+            if mode in {"fitness", "turnover"}:
+                out["decay"] = self._push_param_wider(out["decay"], decay_grid)
+            elif mode == "sharpe":
+                out["decay"] = self._mutate(out["decay"], decay_grid, stay_prob=0.10)
+            else:
+                out["decay"] = self._mutate(out["decay"], decay_grid, stay_prob=0.25)
+
+        if "neutralization" in out and self.rng.random() < 0.18:
+            out["neutralization"] = self.rng.choice(config.DEFAULT_NEUTRALIZATIONS)
+
+        if "truncation" in out and self.rng.random() < 0.08:
+            out["truncation"] = self.rng.choice(config.DEFAULT_TRUNCATIONS)
+
+        return out
+
+    def _sample_settings(self, family):
         return SimulationSettings(
             region=config.DEFAULT_REGION,
             universe=self.rng.choice(config.DEFAULT_UNIVERSES),
-            delay=self.rng.choice(getattr(config, "DEFAULT_DELAYS", [config.DEFAULT_DELAY])),
+            delay=config.DEFAULT_DELAY,
             decay=self.rng.choice(config.DEFAULT_DECAYS),
             neutralization=self.rng.choice(config.DEFAULT_NEUTRALIZATIONS),
             truncation=self.rng.choice(config.DEFAULT_TRUNCATIONS),
@@ -354,134 +458,8 @@ class AlphaGenerator:
             language=config.DEFAULT_LANGUAGE,
         )
 
-    def _mutate_settings_for_mode(self, settings: dict[str, Any], family: str, mode: str) -> dict[str, Any]:
-        out = dict(settings)
-
-        decays = getattr(config, "REFINEMENT_DECAYS", config.DEFAULT_DECAYS)
-        universes = getattr(config, "REFINEMENT_UNIVERSES", config.DEFAULT_UNIVERSES)
-        delays = getattr(config, "DEFAULT_DELAYS", [config.DEFAULT_DELAY])
-        truncs = getattr(config, "REFINEMENT_TRUNCATIONS", config.DEFAULT_TRUNCATIONS)
-
-        # Decay: strongest lever for fitness / turnover rescue
-        if "decay" in out:
-            current_decay = int(out["decay"])
-            if mode == "turnover":
-                out["decay"] = self._bump_setting_up(current_decay, decays)
-            elif mode == "fitness":
-                if self.rng.random() < 0.75:
-                    out["decay"] = self._bump_setting_up(current_decay, decays)
-                else:
-                    out["decay"] = self._mutate_setting_neighbor(current_decay, decays)
-            elif mode == "sharpe":
-                out["decay"] = self._mutate_setting_neighbor(current_decay, decays)
-            else:
-                out["decay"] = self._mutate_setting_neighbor(current_decay, decays)
-
-        # Universe: smaller / more liquid universes help robustness / turnover for near misses.
-        if "universe" in out and len(universes) > 1:
-            if mode in {"fitness", "turnover"}:
-                if self.rng.random() < getattr(config, "REFINEMENT_UNIVERSE_SWITCH_PROB", 0.35):
-                    out["universe"] = self._more_liquid_universe(out["universe"], universes)
-            elif mode == "sharpe" and self.rng.random() < 0.20:
-                out["universe"] = self._mutate_universe_neighbor(out["universe"], universes)
-
-        # Delay: optional, low probability exploration path.
-        if "delay" in out and len(delays) > 1:
-            if mode == "sharpe" and self.rng.random() < getattr(config, "REFINEMENT_DELAY_SWITCH_PROB", 0.10):
-                out["delay"] = self._mutate_setting_neighbor(int(out["delay"]), delays)
-            elif mode in {"fitness", "turnover"} and self.rng.random() < 0.05:
-                out["delay"] = self._mutate_setting_neighbor(int(out["delay"]), delays)
-
-        # Neutralization: small, not dominant, but useful.
-        if "neutralization" in out and self.rng.random() < 0.25:
-            choices = list(config.DEFAULT_NEUTRALIZATIONS)
-            if mode in {"fitness", "turnover"}:
-                out["neutralization"] = self._prefer_stabilizing_neutralization(out["neutralization"], choices)
-            else:
-                out["neutralization"] = self.rng.choice(choices)
-
-        # Truncation: tighter for robustness, occasionally looser for return.
-        if "truncation" in out and truncs:
-            current_trunc = float(out["truncation"])
-            if mode in {"fitness", "turnover"}:
-                if self.rng.random() < 0.45:
-                    out["truncation"] = self._tighter_truncation(current_trunc, truncs)
-            elif mode == "sharpe" and self.rng.random() < 0.20:
-                out["truncation"] = self._mutate_setting_neighbor(current_trunc, truncs)
-
-        # Nan / pasteurization: keep rare and targeted.
-        if family in {"fundamental", "conditional"} and self.rng.random() < getattr(config, "REFINEMENT_NAN_EXPERIMENT_PROB", 0.03):
-            out["nan_handling"] = "ON" if str(out.get("nan_handling", "OFF")).upper() == "OFF" else "OFF"
-        if self.rng.random() < getattr(config, "REFINEMENT_PASTEURIZATION_EXPERIMENT_PROB", 0.02):
-            out["pasteurization"] = "OFF" if str(out.get("pasteurization", "ON")).upper() == "ON" else "ON"
-
-        return out
-
-    def _mutate_setting_neighbor(self, value, grid):
-        ordered = list(grid)
-        if value not in ordered:
-            return self.rng.choice(ordered)
-        idx = ordered.index(value)
-        choices = [value]
-        if idx > 0:
-            choices.append(ordered[idx - 1])
-        if idx < len(ordered) - 1:
-            choices.append(ordered[idx + 1])
-        return self.rng.choice(choices)
-
-    def _bump_setting_up(self, value, grid):
-        ordered = list(grid)
-        if value not in ordered:
-            return self.rng.choice(ordered)
-        idx = ordered.index(value)
-        choices = [value]
-        if idx < len(ordered) - 1:
-            choices.append(ordered[idx + 1])
-        if idx < len(ordered) - 2:
-            choices.append(ordered[idx + 2])
-        return self.rng.choice(choices)
-
-    def _more_liquid_universe(self, current: str, universes: list[str]) -> str:
-        ordered = list(universes)
-        if current not in ordered:
-            return ordered[0]
-        idx = ordered.index(current)
-        choices = [current]
-        if idx > 0:
-            choices.append(ordered[idx - 1])
-        if idx > 1:
-            choices.append(ordered[idx - 2])
-        return self.rng.choice(choices)
-
-    def _mutate_universe_neighbor(self, current: str, universes: list[str]) -> str:
-        ordered = list(universes)
-        if current not in ordered:
-            return self.rng.choice(ordered)
-        idx = ordered.index(current)
-        choices = [current]
-        if idx > 0:
-            choices.append(ordered[idx - 1])
-        if idx < len(ordered) - 1:
-            choices.append(ordered[idx + 1])
-        return self.rng.choice(choices)
-
-    def _prefer_stabilizing_neutralization(self, current: str, choices: list[str]) -> str:
-        if "SUBINDUSTRY" in choices and self.rng.random() < 0.65:
-            return "SUBINDUSTRY"
-        return self.rng.choice(choices)
-
-    def _tighter_truncation(self, current: float, truncs: list[float]) -> float:
-        ordered = sorted(float(x) for x in truncs)
-        if current not in ordered:
-            return ordered[0]
-        idx = ordered.index(current)
-        choices = [current]
-        if idx > 0:
-            choices.append(ordered[idx - 1])
-        return self.rng.choice(choices)
-
     # ============================
-    # REFINEMENT VARIANTS
+    # RENDER / VARIANTS
     # ============================
 
     def _apply_refinement_variants(
@@ -492,37 +470,41 @@ class AlphaGenerator:
         template_id: str,
         params: dict[str, Any],
         mode: str,
+        metrics_hint: dict[str, Any] | None = None,
     ) -> str:
-        candidates = [expr]
+        metrics_hint = metrics_hint or {}
         n = params.get("n", 10)
         m = params.get("m", 10)
+        wider_n = self._push_param_wider(n)
+        wider_m = self._push_param_wider(m, self._grid("m"))
+        narrower_n = self._push_param_narrower(n)
+        narrower_m = self._push_param_narrower(m, self._grid("m"))
+
+        candidates: list[str] = [expr]
+        weights: list[float] = [1.0]
+
+        def add(candidate: str, weight: float = 1.0):
+            candidates.append(candidate)
+            weights.append(weight)
 
         if family == "mean_reversion":
             if mode == "fitness":
-                bigger_n = self._push_param_wider(n)
-                candidates.extend([
-                    f"ts_mean(rank(rank(-(returns - ts_mean(returns, {bigger_n})))), 5)",
-                    f"ts_mean(rank(rank(ts_mean(close, {bigger_n}) - close)), 5)",
-                    f"rank(ts_mean(rank(rank(-(close / ts_mean(close, {n}) - 1))), 3))",
-                ])
+                add(f"ts_mean(rank(rank(-(returns - ts_mean(returns, {wider_n})))), 10)", 1.35)
+                add(f"ts_mean(rank(rank(-(returns - ts_mean(returns, {n})))), 10)", 1.20)
+                add(f"ts_mean(rank(rank(ts_mean(close, {wider_n}) - close)), 5)", 1.10)
+                add(f"rank(ts_mean(rank(rank(-(returns - ts_mean(returns, {n})))), 3))", 0.90)
             elif mode == "turnover":
-                bigger_n = self._push_param_wider(n)
-                candidates.extend([
-                    f"ts_mean(rank(rank(-(returns - ts_mean(returns, {bigger_n})))), 10)",
-                    f"ts_mean(rank(rank(-(close / ts_mean(close, {bigger_n}) - 1))), 5)",
-                ])
+                add(f"ts_mean(rank(rank(-(returns - ts_mean(returns, {wider_n})))), 10)", 1.35)
+                add(f"ts_mean(rank(rank(-(close / ts_mean(close, {wider_n}) - 1))), 5)", 1.15)
+                add(f"ts_mean(rank(rank(-ts_delta(close, {wider_n}))), 10)", 1.05)
             elif mode == "sharpe":
-                if self.rng.random() < getattr(config, "LOW_SHARPE_EXTRA_SIGNAL_PROB", 0.75):
-                    candidates.extend([
-                        f"ts_mean(rank(rank(-ts_delta(close, {n}))), 3)",
-                        f"ts_mean(rank(rank(ts_mean(close, {n}) - close)), 3)",
-                        f"ts_mean(rank(rank(-(returns - ts_mean(returns, {n})))), 3)",
-                    ])
-                else:
-                    candidates.extend([
-                        f"rank(ts_mean(rank(rank(-ts_delta(close, {n}))), 3))",
-                        f"rank(ts_mean(rank(rank(ts_mean(close, {n}) - close)), 3))",
-                    ])
+                add(f"ts_mean(rank(rank(-(returns - ts_mean(returns, {n})))), 3)", 1.35)
+                add(f"ts_mean(rank(rank(ts_mean(close, {n}) - close)), 3)", 1.20)
+                add(f"rank(ts_mean(rank(rank(-ts_delta(close, {n}))), 3))", 1.00)
+                add(f"ts_mean(rank(rank(-(returns - ts_mean(returns, {narrower_n})))), 3)", 0.95)
+            else:
+                add(f"ts_mean(rank(rank(-(returns - ts_mean(returns, {n})))), 5)", 1.10)
+                add(f"ts_mean(rank(rank(ts_mean(close, {n}) - close)), 5)", 1.00)
 
         elif family == "conditional":
             cond_volume = f"volume > ts_mean(volume, {n})"
@@ -530,99 +512,105 @@ class AlphaGenerator:
             cond_abs = f"abs(returns) > ts_std_dev(returns, {n})"
             base_sig = "rank(-returns)"
             if mode == "fitness":
-                candidates.extend([
-                    f"trade_when({cond_tight}, {base_sig}, -1)",
-                    f"ts_mean(rank(trade_when({cond_tight}, {base_sig}, -1)), 5)",
-                    f"trade_when({cond_abs}, {base_sig}, -1)",
-                ])
+                add(f"trade_when({cond_tight}, {base_sig}, -1)", 1.15)
+                add(f"ts_mean(rank(trade_when({cond_tight}, {base_sig}, -1)), 5)", 1.30)
+                add(f"trade_when({cond_abs}, {base_sig}, -1)", 1.00)
             elif mode == "turnover":
-                bigger_n = self._push_param_wider(n)
-                cond_wider = f"volume > ts_mean(volume, {bigger_n}) * 1.1"
-                candidates.extend([
-                    f"trade_when({cond_wider}, {base_sig}, -1)",
-                    f"ts_mean(rank(trade_when({cond_wider}, {base_sig}, -1)), 10)",
-                ])
+                cond_wider = f"volume > ts_mean(volume, {wider_n}) * 1.1"
+                add(f"trade_when({cond_wider}, {base_sig}, -1)", 1.20)
+                add(f"ts_mean(rank(trade_when({cond_wider}, {base_sig}, -1)), 10)", 1.35)
             elif mode == "sharpe":
-                candidates.extend([
-                    f"trade_when({cond_volume}, rank(-ts_delta(close, {n})), -1)",
-                    f"trade_when({cond_abs}, {base_sig}, -1)",
-                ])
+                add(f"ts_mean(rank(trade_when({cond_volume}, {base_sig}, -1)), 3)", 1.30)
+                add(f"trade_when({cond_volume}, rank(-ts_delta(close, {n})), -1)", 1.00)
+                add(f"trade_when({cond_abs}, {base_sig}, -1)", 0.95)
+            else:
+                add(f"ts_mean(rank(trade_when({cond_volume}, {base_sig}, -1)), 5)", 1.10)
 
         elif family == "volume_flow":
             if mode == "fitness":
-                candidates.extend([
-                    f"ts_mean(rank(rank((volume / ts_mean(volume, {n})) * -returns)), 10)",
-                    f"rank((volume / ts_mean(volume, {n})) * -returns)",
-                    f"ts_mean(rank(rank(ts_delta(volume, {n}) * returns)), 5)",
-                ])
+                add(f"ts_mean(rank(rank((volume / ts_mean(volume, {wider_n})) * -returns)), 10)", 1.35)
+                add(f"rank(ts_mean(rank((volume / ts_mean(volume, {n})) * -returns), 5))", 1.05)
+                add(f"ts_mean(rank(rank((volume / ts_mean(volume, {wider_n})) * -returns)), 5)", 1.10)
             elif mode == "turnover":
-                wider_n = self._push_param_wider(n)
-                candidates.extend([
-                    f"ts_mean(rank(rank((volume / ts_mean(volume, {wider_n})) * -returns)), 10)",
-                    f"trade_when(abs(returns) > ts_std_dev(returns, {wider_n}), rank((volume / ts_mean(volume, {wider_n})) * -returns), -1)",
-                ])
+                add(f"ts_mean(rank(rank((volume / ts_mean(volume, {wider_n})) * -returns)), 10)", 1.35)
+                add(f"trade_when(abs(returns) > ts_std_dev(returns, {wider_n}), rank((volume / ts_mean(volume, {wider_n})) * -returns), -1)", 1.10)
             elif mode == "sharpe":
-                candidates.extend([
-                    f"ts_mean(rank(rank((volume / ts_mean(volume, {n})) * -returns)), 3)",
-                    f"rank(ts_mean(rank((volume / ts_mean(volume, {n})) * -returns), 3))",
-                ])
+                add(f"ts_mean(rank(rank((volume / ts_mean(volume, {n})) * -returns)), 3)", 1.30)
+                add(f"rank(ts_mean(rank((volume / ts_mean(volume, {n})) * -returns), 3))", 1.05)
+                add(f"ts_mean(rank(rank((volume / ts_mean(volume, {narrower_n})) * -returns)), 3)", 0.90)
+            else:
+                add(f"ts_mean(rank(rank((volume / ts_mean(volume, {n})) * -returns)), 5)", 1.10)
 
         elif family == "vol_adjusted":
             if mode == "fitness":
-                wider_n = self._push_param_wider(n)
-                wider_m = self._push_param_wider(m, self._grid("m"))
-                candidates.extend([
-                    f"ts_mean(rank(rank((ts_mean(close, {wider_n}) - close) / ts_std_dev(returns, {wider_m}))), 5)",
-                    f"rank((ts_mean(close, {wider_n}) - close) / ts_std_dev(returns, {wider_m}))",
-                ])
+                add(f"ts_mean(rank(rank((ts_mean(close, {wider_n}) - close) / ts_std_dev(returns, {wider_m}))), 5)", 1.30)
+                add(f"rank(ts_mean(rank((ts_mean(close, {wider_n}) - close) / ts_std_dev(returns, {wider_m})), 5))", 1.00)
             elif mode == "turnover":
-                wider_n = self._push_param_wider(n)
-                wider_m = self._push_param_wider(m, self._grid("m"))
-                candidates.extend([
-                    f"ts_mean(rank(rank((ts_mean(close, {wider_n}) - close) / ts_std_dev(returns, {wider_m}))), 10)",
-                ])
+                add(f"ts_mean(rank(rank((ts_mean(close, {wider_n}) - close) / ts_std_dev(returns, {wider_m}))), 10)", 1.35)
             elif mode == "sharpe":
-                candidates.extend([
-                    f"ts_mean(rank(rank((ts_mean(close, {n}) - close) / ts_std_dev(returns, {m}))), 3)",
-                    f"rank(ts_mean(rank((ts_mean(close, {n}) - close) / ts_std_dev(returns, {m})), 3))",
-                ])
+                add(f"ts_mean(rank(rank((ts_mean(close, {n}) - close) / ts_std_dev(returns, {m}))), 3)", 1.30)
+                add(f"rank(ts_mean(rank((ts_mean(close, {narrower_n}) - close) / ts_std_dev(returns, {narrower_m})), 3))", 1.00)
+            else:
+                add(f"ts_mean(rank(rank((ts_mean(close, {n}) - close) / ts_std_dev(returns, {m}))), 5)", 1.10)
 
         elif family == "fundamental":
             field = params.get("field", "sales")
-            candidates.extend([
-                f"rank({field})",
-                f"rank(ts_delta({field}, {n}))",
-                f"rank(({field} - ts_mean({field}, {n})))",
-            ])
+            add(f"rank({field})", 1.10)
+            add(f"rank(ts_delta({field}, {n}))", 1.00)
+            add(f"rank(({field} - ts_mean({field}, {n})))", 1.00)
 
-        return self.rng.choice(candidates)
+        deduped, deduped_weights = self._dedupe_weighted(candidates, weights)
+        simple_candidates = []
+        simple_weights = []
+        for candidate, weight in zip(deduped, deduped_weights):
+            if candidate.count("ts_mean(") <= 2 and candidate.count("rank(") <= 4:
+                simple_candidates.append(candidate)
+                simple_weights.append(weight)
 
-    # ============================
-    # RENDER / FIELDS / HELPERS
-    # ============================
+        pool = simple_candidates or deduped
+        pool_weights = simple_weights or deduped_weights
+        return self.rng.choices(pool, weights=pool_weights, k=1)[0]
 
-    def _render(self, template: str, params: dict[str, Any]):
+    def _render(self, template, params):
         expr = template.format(**params)
-        fields = []
+        fields = self._extract_fields(expr, params)
+        return expr, fields
 
-        for key in ["field"]:
-            if key in params:
-                fields.append(params[key])
+    def _extract_fields(self, expr: str, params: dict[str, Any], existing_fields: list[str] | None = None):
+        fields = list(existing_fields or [])
+
+        if "field" in params and params["field"] not in fields:
+            fields.append(params["field"])
 
         for f in ["close", "returns", "volume", "cap", "assets", "sales", "income", "cash"]:
             if f in expr and f not in fields:
                 fields.append(f)
 
-        return expr, fields
+        return fields
 
-    def _extract_fields(self, expr: str, params: dict[str, Any], fallback_fields: list[str]):
-        _, fields = self._render(expr, params) if "{" in expr else (expr, [])
-        if fields:
-            return fields
-        out = list(fallback_fields)
-        for f in ["close", "returns", "volume", "cap", "assets", "sales", "income", "cash"]:
-            if f in expr and f not in out:
-                out.append(f)
-        if "field" in params and params["field"] not in out:
-            out.append(params["field"])
-        return out
+    def _safe_float(self, x):
+        try:
+            return None if x is None else float(x)
+        except (TypeError, ValueError):
+            return None
+
+    def _json_or_dict(self, value):
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            return json.loads(value)
+        return dict(value)
+
+    def _dedupe_weighted(self, candidates: list[str], weights: list[float]):
+        seen = {}
+        ordered = []
+        ordered_weights = []
+        for candidate, weight in zip(candidates, weights):
+            if candidate in seen:
+                idx = seen[candidate]
+                ordered_weights[idx] = max(ordered_weights[idx], weight)
+                continue
+            seen[candidate] = len(ordered)
+            ordered.append(candidate)
+            ordered_weights.append(weight)
+        return ordered, ordered_weights
