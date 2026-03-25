@@ -13,6 +13,12 @@ def canonicalize_expression(expr: str) -> str:
     """
     expr = expr.strip()
 
+    # Fix Unicode-escaped comparison operators (WQ API returns \u003E for >)
+    expr = expr.replace("\\u003E", ">").replace("\\u003e", ">")
+    expr = expr.replace("\\u003C", "<").replace("\\u003c", "<")
+    expr = expr.replace("\u003E", ">").replace("\u003e", ">")
+    expr = expr.replace("\u003C", "<").replace("\u003c", "<")
+
     # collapse all whitespace
     expr = re.sub(r"\s+", " ", expr)
 

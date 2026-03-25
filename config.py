@@ -24,8 +24,8 @@ SIM_TIMEOUT_MINUTES = 45
 # Default simulation settings
 DEFAULT_REGION = "USA"
 DEFAULT_DELAY = 1
-DEFAULT_UNIVERSES = ["TOP3000"]
-DEFAULT_NEUTRALIZATIONS = ["SUBINDUSTRY", "INDUSTRY", "MARKET"]
+DEFAULT_UNIVERSES = ["TOP3000", "TOPSP500"]
+DEFAULT_NEUTRALIZATIONS = ["SUBINDUSTRY", "INDUSTRY", "MARKET", "SECTOR"]
 DEFAULT_DECAYS = [2, 4, 6, 8, 10, 12]
 DEFAULT_TRUNCATIONS = [0.05, 0.08, 0.10]
 
@@ -56,7 +56,7 @@ FRONTIER_ALT_MIN_SHARPE = 1.45
 FRONTIER_ALT_MIN_FITNESS = 0.68
 
 # Frontier templates worth exploiting more aggressively
-STRONG_TEMPLATES = {"mr_04", "vol_03", "va_02", "mr_01", "cond_01"}
+STRONG_TEMPLATES = {"cs_02", "pvc_04", "vol_03", "cond_01", "va_02", "mr_02", "pvc_03"}
 ELITE_TEMPLATES = {"mr_04", "vol_03", "va_02", "cond_01"}
 
 # Diversity / anti-self-correlation
@@ -84,12 +84,12 @@ TEMPLATE_EXPLORATION_PROBABILITY = 0.10
 SOFT_PRUNE_REFINEMENT_PROBABILITY = 0.35
 
 # Submission behaviour
-AUTO_SUBMIT = False
+AUTO_SUBMIT = True
 
 # Submission diversity / self-correlation avoidance
 # Structural similarity threshold: if candidate > this vs any submitted alpha, flag as correlated
 # This is a PROXY for PnL correlation — structural sim 0.50+ typically means PnL corr > 0.70
-SUBMISSION_MAX_SIMILARITY = 0.52
+SUBMISSION_MAX_SIMILARITY = 0.45
 # Boost factor for families NOT yet represented in submissions
 UNSUBMITTED_FAMILY_BOOST = 1.60
 
@@ -102,25 +102,43 @@ DEFAULT_FAMILY_ORDER = [
     "volume_flow",
     "conditional",
     "vol_adjusted",
+    "price_vol_corr",
+    "volatility",
+    "intraday",
+    "cross_sectional",
+    "fundamental_value",
+    "analyst_sentiment",
+    "options_vol",
     "fundamental",
     "momentum",
 ]
 
 FAMILY_BASE_WEIGHTS = {
-    "mean_reversion": 1.15,
-    "volume_flow": 1.10,
-    "conditional": 1.00,
-    "vol_adjusted": 1.00,
-    "fundamental": 0.60,
-    "momentum": 0.10,
+    "mean_reversion": 0.60,      # Already submitted, reduce exploration
+    "volume_flow": 0.80,         # vol_03 still near-passing
+    "conditional": 1.00,         # cond_01 just passed! Keep exploring
+    "vol_adjusted": 0.70,        # va_02 near-passing but exhausting refinement
+    "price_vol_corr": 1.40,      # pvc_04 Sharpe 1.69 near-passer — high priority
+    "volatility": 0.50,          # Only 2 templates left after removing locked ones
+    "intraday": 0.60,            # Weak so far but under-explored
+    "cross_sectional": 1.50,     # cs_02 PASSED! Best new family — highest priority
+    "fundamental_value": 0.80,   # Moderate signal, needs more exploration
+    "analyst_sentiment": 0.50,   # Weak signal so far
+    "options_vol": 0.70,         # Had field errors, now fixed
+    "fundamental": 0.20,         # Consistently weak
+    "momentum": 0.05,            # Dead
 }
 
 TEMPLATE_BASE_WEIGHTS = {
-    "mr_04": 1.20,
-    "vol_03": 1.22,
-    "va_02": 1.10,
-    "mr_01": 1.08,
-    "cond_01": 1.05,
+    "cs_02": 1.50,      # avg_sharpe=1.279, PRODUCED ELIGIBLE — top priority
+    "pvc_04": 1.35,     # Sharpe 1.690 near-passer
+    "vol_03": 1.20,     # avg_sharpe=1.060, consistent near-passer
+    "mr_02": 1.15,      # avg_sharpe=1.063
+    "cond_01": 1.10,    # PRODUCED ELIGIBLE
+    "va_02": 1.05,      # avg_sharpe=0.945
+    "mr_04": 0.90,      # Already submitted family
+    "pvc_03": 1.00,     # avg_sharpe=0.820, decent
+    "mr_01": 0.80,
 }
 
 PREFERRED_TEMPLATE_BOOSTS = {

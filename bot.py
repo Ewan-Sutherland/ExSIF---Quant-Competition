@@ -231,23 +231,32 @@ class AlphaBot:
             result.get("alpha_id")
             or result.get("raw", {}).get("alpha_id")
             or result.get("raw", {}).get("id")
+            or result.get("raw", {}).get("alpha")
         )
 
         if not alpha_id:
-            print(f"[SUBMIT_SKIP] run_id={run_id} reason=no_alpha_id_found")
+            print(f"[SUBMIT_SKIP] run_id={run_id} reason=no_alpha_id_found raw_keys={list(result.get('raw', {}).keys())}")
             return
 
+        # Get sim_id for PATCH approach (teammate's method)
+        sim_id = None
+        run_row = self.storage.get_run_by_id(run_id)
+        if run_row:
+            sim_id = run_row["sim_id"]
+
+        print(f"[SUBMIT_STARTING] run_id={run_id} alpha_id={alpha_id} sim_id={sim_id}")
+
         try:
-            submission_response = self.client.submit_alpha(alpha_id)
+            submission_response = self.client.submit_alpha(alpha_id, sim_id=sim_id)
             self.storage.insert_submission(
                 submission_id=new_id("sub"),
                 candidate_id=candidate_id,
                 run_id=run_id,
                 submitted_at=utc_now(),
                 submission_status="submitted",
-                message=str(submission_response),
+                message=str(submission_response)[:500],
             )
-            print(f"[SUBMITTED] run_id={run_id} alpha_id={alpha_id}")
+            print(f"[SUBMITTED] run_id={run_id} alpha_id={alpha_id} response={str(submission_response)[:200]}")
         except Exception as exc:
             self.storage.insert_submission(
                 submission_id=new_id("sub"),
@@ -255,7 +264,7 @@ class AlphaBot:
                 run_id=run_id,
                 submitted_at=utc_now(),
                 submission_status="failed",
-                message=str(exc),
+                message=str(exc)[:500],
             )
             print(f"[SUBMIT_FAILED] run_id={run_id} alpha_id={alpha_id} error={exc}")
 
@@ -266,14 +275,15 @@ class AlphaBot:
         sharpe: float | None,
     ) -> dict:
         """
-        Check if an eligible candidate is structurally diverse enough
-        from already-submitted alphas to likely pass self-correlation.
+        Check if an eligible candidate will likely pass WQ's self-correlation test.
 
-        Uses structural similarity as a proxy for PnL correlation:
-        - same family + same template + similar params → high PnL correlation
-        - different family or different data fields → likely low correlation
+        WQ measures PnL Pearson correlation against ALL submitted alphas.
+        Rule: correlation < 0.7, OR Sharpe >= 10% better than correlated alpha.
 
-        WQ rule: self-correlation < 0.7 OR Sharpe ≥ 10% better than correlated alpha.
+        Our proxy uses THREE layers:
+        1. Core signal match — if the inner signal is identical, PnL correlation ~0.8+
+        2. Same family — same family alphas typically correlate 0.5-0.8
+        3. Structural similarity — fallback for cross-family checks
         """
         submitted_rows = self.storage.get_submitted_candidate_rows(limit=300)
 
@@ -284,12 +294,52 @@ class AlphaBot:
         if candidate_row is None:
             return {"fits": True, "max_similarity": 0.0, "reason": "candidate_not_found"}
 
-        # Use signature_from_row for both sides — works directly with DB rows
-        cand_sig = self.similarity_engine.signature_from_row(candidate_row)
+        cand_expr = candidate_row["canonical_expression"]
+        cand_family = candidate_row["family"]
+        cand_core = self._extract_core_signal(cand_expr)
 
+        # Check against EVERY submitted alpha (not just best match)
+        for ref_row in submitted_rows:
+            ref_expr = ref_row["canonical_expression"]
+            ref_family = ref_row["family"]
+            ref_sharpe = ref_row["sharpe"]
+            ref_core = self._extract_core_signal(ref_expr)
+            ref_cid = ref_row["candidate_id"]
+            ref_tid = ref_row["template_id"]
+
+            # Layer 1: Core signal match — near-certain PnL correlation > 0.7
+            if cand_core and ref_core and cand_core == ref_core:
+                # Same core signal — only pass if Sharpe is 10% better
+                if sharpe is not None and ref_sharpe is not None and sharpe >= float(ref_sharpe) * 1.10:
+                    continue  # This specific ref is ok, check others
+                return {
+                    "fits": False,
+                    "max_similarity": 0.95,
+                    "reason": f"same_core_signal '{cand_core}' vs submitted {ref_cid}",
+                    "ref_candidate_id": ref_cid,
+                    "ref_family": ref_family,
+                    "ref_template_id": ref_tid,
+                }
+
+            # Layer 2: Same family — high risk of PnL correlation 0.5-0.8
+            if cand_family == ref_family:
+                # Same family but different core signal — still risky
+                # Require Sharpe 10% better to be safe
+                if sharpe is not None and ref_sharpe is not None and sharpe >= float(ref_sharpe) * 1.10:
+                    continue
+                return {
+                    "fits": False,
+                    "max_similarity": 0.70,
+                    "reason": f"same_family '{cand_family}' — needs Sharpe >= {float(ref_sharpe) * 1.10:.2f} vs submitted {ref_cid}",
+                    "ref_candidate_id": ref_cid,
+                    "ref_family": ref_family,
+                    "ref_template_id": ref_tid,
+                }
+
+        # Layer 3: Cross-family structural similarity check
+        cand_sig = self.similarity_engine.signature_from_row(candidate_row)
         best_score = 0.0
         best_ref_row = None
-        best_ref_sig = None
 
         for ref_row in submitted_rows:
             ref_sig = self.similarity_engine.signature_from_row(ref_row)
@@ -297,52 +347,103 @@ class AlphaBot:
             if score > best_score:
                 best_score = score
                 best_ref_row = ref_row
-                best_ref_sig = ref_sig
 
-        max_sim = best_score
-        threshold = getattr(config, "SUBMISSION_MAX_SIMILARITY", 0.52)
+        threshold = getattr(config, "SUBMISSION_MAX_SIMILARITY", 0.45)
 
-        if max_sim < threshold or best_ref_row is None:
+        if best_score >= threshold and best_ref_row is not None:
+            ref_sharpe = best_ref_row["sharpe"]
+            if sharpe is not None and ref_sharpe is not None and sharpe >= float(ref_sharpe) * 1.10:
+                return {
+                    "fits": True,
+                    "max_similarity": best_score,
+                    "reason": f"cross_family_sharpe_override",
+                    "sharpe_margin": f"{sharpe:.3f} vs {float(ref_sharpe):.3f}",
+                }
             return {
-                "fits": True,
-                "max_similarity": max_sim,
-                "reason": "diverse_enough",
-            }
-
-        # Structurally similar — check Sharpe margin (WQ 10% rule)
-        ref_sharpe = best_ref_row["sharpe"] if best_ref_row is not None else None
-        ref_cid = best_ref_row["candidate_id"] if best_ref_row is not None else None
-        ref_fam = best_ref_row["family"] if best_ref_row is not None else None
-        ref_tid = best_ref_row["template_id"] if best_ref_row is not None else None
-
-        if sharpe is not None and ref_sharpe is not None and sharpe >= float(ref_sharpe) * 1.10:
-            return {
-                "fits": True,
-                "max_similarity": max_sim,
-                "reason": f"sharpe_override ({sharpe:.3f} >= {float(ref_sharpe):.3f}*1.10)",
-                "sharpe_margin": f"{sharpe:.3f} vs {float(ref_sharpe):.3f}",
-                "ref_candidate_id": ref_cid,
-                "ref_family": ref_fam,
+                "fits": False,
+                "max_similarity": best_score,
+                "reason": f"cross_family_too_similar (sim={best_score:.3f})",
+                "ref_candidate_id": best_ref_row["candidate_id"],
+                "ref_family": best_ref_row["family"],
+                "ref_template_id": best_ref_row["template_id"],
             }
 
         return {
-            "fits": False,
-            "max_similarity": max_sim,
-            "reason": f"too_similar (sim={max_sim:.3f} >= {threshold:.2f})",
-            "ref_candidate_id": ref_cid,
-            "ref_family": ref_fam,
-            "ref_template_id": ref_tid,
+            "fits": True,
+            "max_similarity": best_score,
+            "reason": "diverse_enough",
         }
+
+    def _extract_core_signal(self, expression: str) -> str:
+        """
+        Extract the core inner signal from an expression, stripping wrappers.
+
+        ts_decay_linear(rank(rank(-(returns - ts_mean(returns, 5)))), 10)
+        ts_mean(rank(rank(-(returns - ts_mean(returns, 5)))), 5)
+        rank(-(returns - ts_mean(returns, 5)))
+
+        All have the same core: -(returns - ts_mean(returns, 5))
+
+        Similarly for volume_flow:
+        (volume / ts_mean(volume, N)) * -returns  is the core for vol_03
+        """
+        import re
+        expr = expression.strip()
+
+        # Strip outer wrappers iteratively: ts_mean(..., N), ts_decay_linear(..., N), rank(...)
+        changed = True
+        while changed:
+            changed = False
+
+            # Strip ts_mean(X, N) or ts_decay_linear(X, N)
+            for func in ["ts_mean", "ts_decay_linear"]:
+                pattern = f"^{func}\\((.+),\\s*\\d+\\)$"
+                m = re.match(pattern, expr)
+                if m:
+                    expr = m.group(1).strip()
+                    changed = True
+
+            # Strip outer rank(X)
+            if expr.startswith("rank(") and expr.endswith(")"):
+                inner = expr[5:-1]
+                # Verify balanced parens
+                depth = 0
+                balanced = True
+                for ch in inner:
+                    if ch == "(":
+                        depth += 1
+                    elif ch == ")":
+                        depth -= 1
+                    if depth < 0:
+                        balanced = False
+                        break
+                if balanced and depth == 0:
+                    expr = inner.strip()
+                    changed = True
+
+        return expr
 
     def _get_submitted_family_set(self) -> set[str]:
         """Return set of families that have been successfully submitted."""
         submitted_rows = self.storage.get_submitted_candidate_rows(limit=300)
-        return {row["family"] for row in submitted_rows if row.get("family")}
+        families = set()
+        for row in submitted_rows:
+            try:
+                families.add(row["family"])
+            except (KeyError, IndexError):
+                pass
+        return families
 
     def _get_submitted_template_set(self) -> set[str]:
         """Return set of template_ids that have been successfully submitted."""
         submitted_rows = self.storage.get_submitted_candidate_rows(limit=300)
-        return {row["template_id"] for row in submitted_rows if row.get("template_id")}
+        templates = set()
+        for row in submitted_rows:
+            try:
+                templates.add(row["template_id"])
+            except (KeyError, IndexError):
+                pass
+        return templates
 
     # =========================================================
     # Stats / scoring maps
@@ -497,10 +598,19 @@ class AlphaBot:
         return True
 
     def _candidate_allowed_by_diversity(self, candidate, is_refinement: bool) -> bool:
+        # Always allow strong templates for refinement
         if candidate.template_id in getattr(config, "STRONG_TEMPLATES", set()):
             if is_refinement:
                 return True
             return self.generator.rng.random() < 0.92
+
+        # Submission diversity override: if this candidate's family has no submissions yet,
+        # be much more permissive — we NEED diverse family submissions
+        submitted_families = self._get_submitted_family_set()
+        if submitted_families and candidate.family not in submitted_families:
+            # Family not yet submitted — relax diversity limits heavily
+            if candidate.family not in {"momentum", "fundamental"}:
+                return True
 
         stats = self.storage.get_recent_template_stats(limit=config.DIVERSITY_LOOKBACK_RUNS)
         template_stats = None

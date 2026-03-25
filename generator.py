@@ -7,16 +7,28 @@ from typing import Any
 import config
 from canonicalize import canonicalize_expression, hash_candidate
 from models import Candidate, SimulationSettings
-from templates import FUNDAMENTAL_FIELDS, SAFE_PARAM_RANGES, TEMPLATE_LIBRARY
+from templates import (
+    FUNDAMENTAL_FIELDS, DEEP_FUNDAMENTAL_FIELDS, ANALYST_FIELDS,
+    SENTIMENT_FIELDS, OPTIONS_WINDOWS,
+    SAFE_PARAM_RANGES, TEMPLATE_LIBRARY,
+)
 
 
 DEFAULT_BASE_FAMILY_WEIGHTS = {
-    "mean_reversion": 3.5,
+    "mean_reversion": 2.5,
     "momentum": 0.01,
-    "volume_flow": 3.0,
-    "vol_adjusted": 1.2,
-    "fundamental": 0.02,
-    "conditional": 2.2,
+    "volume_flow": 2.5,
+    "vol_adjusted": 1.5,
+    "fundamental": 0.05,
+    "conditional": 2.0,
+    # New families — high initial weight to explore them quickly
+    "price_vol_corr": 3.0,
+    "volatility": 2.8,
+    "intraday": 2.5,
+    "cross_sectional": 2.2,
+    "fundamental_value": 2.0,
+    "analyst_sentiment": 2.5,
+    "options_vol": 1.8,
 }
 
 
@@ -76,7 +88,7 @@ class AlphaGenerator:
         )
 
         params = self._mutate_params_for_mode(params, chosen_template["expression"], mode, metrics_hint=metrics_hint)
-        settings = self._mutate_settings(settings, mode=mode)
+        settings = self._mutate_settings(settings, mode=mode, family=family)
 
         expr, fields = self._render(chosen_template["expression"], params)
         expr, realized_template_id = self._apply_refinement_variants(
@@ -359,6 +371,14 @@ class AlphaGenerator:
             p["m"] = self.rng.choice(self._grid("m"))
         if "{field}" in template:
             p["field"] = self.rng.choice(FUNDAMENTAL_FIELDS)
+        if "{deep_field}" in template:
+            p["deep_field"] = self.rng.choice(DEEP_FUNDAMENTAL_FIELDS)
+        if "{analyst_field}" in template:
+            p["analyst_field"] = self.rng.choice(ANALYST_FIELDS)
+        if "{sentiment_field}" in template:
+            p["sentiment_field"] = self.rng.choice(SENTIMENT_FIELDS)
+        if "{opt_window}" in template:
+            p["opt_window"] = self.rng.choice(OPTIONS_WINDOWS)
         return p
 
     def _mutate_params_for_mode(self, params, template, mode: str, metrics_hint: dict[str, Any] | None = None):
@@ -408,6 +428,30 @@ class AlphaGenerator:
         if "{field}" in template and "field" not in out:
             out["field"] = self.rng.choice(FUNDAMENTAL_FIELDS)
 
+        if "deep_field" in out and self.rng.random() < 0.15:
+            out["deep_field"] = self.rng.choice(DEEP_FUNDAMENTAL_FIELDS)
+
+        if "{deep_field}" in template and "deep_field" not in out:
+            out["deep_field"] = self.rng.choice(DEEP_FUNDAMENTAL_FIELDS)
+
+        if "analyst_field" in out and self.rng.random() < 0.15:
+            out["analyst_field"] = self.rng.choice(ANALYST_FIELDS)
+
+        if "{analyst_field}" in template and "analyst_field" not in out:
+            out["analyst_field"] = self.rng.choice(ANALYST_FIELDS)
+
+        if "sentiment_field" in out and self.rng.random() < 0.15:
+            out["sentiment_field"] = self.rng.choice(SENTIMENT_FIELDS)
+
+        if "{sentiment_field}" in template and "sentiment_field" not in out:
+            out["sentiment_field"] = self.rng.choice(SENTIMENT_FIELDS)
+
+        if "opt_window" in out and self.rng.random() < 0.15:
+            out["opt_window"] = self.rng.choice(OPTIONS_WINDOWS)
+
+        if "{opt_window}" in template and "opt_window" not in out:
+            out["opt_window"] = self.rng.choice(OPTIONS_WINDOWS)
+
         return out
 
     def _mutate(self, val, grid, stay_prob: float = 0.35):
@@ -456,12 +500,17 @@ class AlphaGenerator:
     # SETTINGS
     # ============================
 
-    def _mutate_settings(self, s, mode: str = "general"):
+    def _mutate_settings(self, s, mode: str = "general", family: str = ""):
         out = dict(s)
 
         if "decay" in out:
             decay_grid = list(config.DEFAULT_DECAYS)
-            if mode in {"fitness", "turnover"}:
+            if family == "volume_flow" and mode in {"fitness", "turnover"}:
+                # Volume-flow alphas are inherently high-turnover — push decay hard
+                # Data shows vol_03 near-passers at fitness 0.92-0.98 need decay 8-12
+                high_decay = [d for d in decay_grid if d >= 8] or decay_grid[-2:]
+                out["decay"] = self.rng.choice(high_decay)
+            elif mode in {"fitness", "turnover"}:
                 out["decay"] = self._push_param_wider(out["decay"], decay_grid)
             elif mode == "sharpe":
                 out["decay"] = self._mutate(out["decay"], decay_grid, stay_prob=0.10)
@@ -473,10 +522,15 @@ class AlphaGenerator:
         if "neutralization" in out and self.rng.random() < neut_prob:
             out["neutralization"] = self.rng.choice(config.DEFAULT_NEUTRALIZATIONS)
 
-        # Actually mutate truncation — it matters for fitness and turnover
-        trunc_prob = 0.30 if mode in {"fitness", "turnover"} else 0.08
+        # Truncation matters for fitness and turnover
+        trunc_prob = 0.30 if mode in {"fitness", "turnover"} else 0.10
         if "truncation" in out and self.rng.random() < trunc_prob:
             out["truncation"] = self.rng.choice(config.DEFAULT_TRUNCATIONS)
+
+        # Universe swap — sub-universe Sharpe test is a common failure
+        universe_prob = 0.12 if mode == "fitness" else 0.05
+        if "universe" in out and self.rng.random() < universe_prob:
+            out["universe"] = self.rng.choice(config.DEFAULT_UNIVERSES)
 
         return out
 
@@ -673,10 +727,23 @@ class AlphaGenerator:
     def _extract_fields(self, expr: str, params: dict[str, Any], existing_fields: list[str] | None = None):
         fields = list(existing_fields or [])
 
-        if "field" in params and params["field"] not in fields:
-            fields.append(params["field"])
+        # Extract named params
+        for key in ["field", "deep_field", "analyst_field", "sentiment_field"]:
+            if key in params and params[key] not in fields:
+                fields.append(params[key])
 
-        for f in ["close", "returns", "volume", "cap", "assets", "sales", "income", "cash"]:
+        # Detect known fields in expression text
+        known_fields = [
+            "close", "returns", "volume", "cap", "assets", "sales", "income", "cash",
+            "open", "high", "low", "vwap", "adv20",
+            "cashflow_op", "ebit", "ebitda", "enterprise_value",
+            "bookvalue_ps", "debt", "equity", "current_ratio",
+            "eps", "capex", "cashflow", "cogs", "cash_st",
+            "consensus_analyst_rating",
+            "scl12_buzz", "scl12_sentiment", "snt_social_value",
+            "implied_volatility_call", "implied_volatility_put", "historical_volatility",
+        ]
+        for f in known_fields:
             if f in expr and f not in fields:
                 fields.append(f)
 

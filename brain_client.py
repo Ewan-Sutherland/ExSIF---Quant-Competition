@@ -195,26 +195,113 @@ class BrainClient:
 
         return result
 
-    def submit_alpha(self, alpha_id: str) -> dict[str, Any]:
+    def submit_alpha(self, alpha_id: str, sim_id: str | None = None) -> dict[str, Any]:
         """
-        Optional final alpha submission.
-        Adjust endpoint later if needed.
+        Submit an alpha for out-of-sample testing.
+        Tries multiple approaches — the PATCH /simulations/{sim_id} method
+        (from teammate's working implementation) is tried first.
         """
         self.ensure_session()
 
-        url = f"{self.base_url}/alphas/{alpha_id}/submit"
-        response = self.session.post(url, timeout=self.timeout_seconds)
+        attempts = []
 
-        if response.status_code == 401:
-            self.login()
-            response = self.session.post(url, timeout=self.timeout_seconds)
+        # Approach 0 (MOST LIKELY TO WORK): PATCH /simulations/{sim_id} with {"stage": "ALPHA"}
+        # This is how teammate's bot successfully submits — promotes sim to alpha stage
+        if sim_id:
+            # Extract bare sim_id from full URL if needed
+            bare_sim_id = sim_id
+            if sim_id.startswith("http"):
+                bare_sim_id = sim_id.rstrip("/").split("/")[-1]
+            attempts.append({
+                "method": "PATCH",
+                "url": f"{self.base_url}/simulations/{bare_sim_id}",
+                "json": {"stage": "ALPHA"},
+                "desc": f"PATCH /simulations/{bare_sim_id} stage=ALPHA",
+            })
 
-        if response.status_code not in (200, 201, 202):
-            raise BrainAPIError(
-                f"Alpha submission failed with status {response.status_code}: {response.text}"
-            )
+        # Approach 1: POST /alphas/{alpha_id}/submit
+        attempts.append({
+            "method": "POST",
+            "url": f"{self.base_url}/alphas/{alpha_id}/submit",
+            "json": None,
+            "desc": f"POST /alphas/{alpha_id}/submit",
+        })
 
-        return self._parse_json(response)
+        # Approach 2: PATCH /alphas/{alpha_id} with submit
+        attempts.append({
+            "method": "PATCH",
+            "url": f"{self.base_url}/alphas/{alpha_id}",
+            "json": {"stage": "OS"},
+            "desc": f"PATCH /alphas/{alpha_id} stage=OS",
+        })
+
+        last_response = None
+        last_error = None
+
+        for attempt in attempts:
+            try:
+                if attempt["json"]:
+                    response = self.session.request(
+                        attempt["method"], attempt["url"],
+                        json=attempt["json"], timeout=self.timeout_seconds,
+                    )
+                else:
+                    response = self.session.request(
+                        attempt["method"], attempt["url"],
+                        timeout=self.timeout_seconds,
+                    )
+
+                if response.status_code == 401:
+                    self.login()
+                    if attempt["json"]:
+                        response = self.session.request(
+                            attempt["method"], attempt["url"],
+                            json=attempt["json"], timeout=self.timeout_seconds,
+                        )
+                    else:
+                        response = self.session.request(
+                            attempt["method"], attempt["url"],
+                            timeout=self.timeout_seconds,
+                        )
+
+                last_response = response
+                result = self._parse_json(response)
+
+                print(
+                    f"[SUBMIT_ATTEMPT] {attempt['desc']} "
+                    f"status_code={response.status_code} "
+                    f"response={str(result)[:300]}"
+                )
+
+                if response.status_code in (200, 201, 202):
+                    # Verify by checking alpha status
+                    try:
+                        verify = self.get_alpha(alpha_id)
+                        new_status = str(verify.get("status", "?")).upper()
+                        new_stage = str(verify.get("stage", "?")).upper()
+                        print(
+                            f"[SUBMIT_VERIFY] alpha_id={alpha_id} "
+                            f"status={new_status} stage={new_stage}"
+                        )
+                        if new_status in ("SUBMITTED", "ACTIVE") or new_stage == "OS":
+                            return result
+                    except Exception as ve:
+                        print(f"[SUBMIT_VERIFY_ERROR] {ve}")
+
+                    return result
+
+            except Exception as exc:
+                last_error = exc
+                print(f"[SUBMIT_ATTEMPT_FAILED] {attempt['desc']} error={exc}")
+                continue
+
+        if last_response is not None and last_response.status_code in (200, 201, 202):
+            return self._parse_json(last_response)
+
+        raise BrainAPIError(
+            f"All submission approaches failed for alpha_id={alpha_id}. "
+            f"Last error: {last_error}"
+        )
 
     def wait_for_completion(
         self,
