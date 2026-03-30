@@ -12,7 +12,8 @@ DATA_DIR.mkdir(exist_ok=True)
 DB_PATH = DATA_DIR / "bot.db"
 
 # Storage backend: "sqlite" or "supabase"
-STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "sqlite")
+# v6.0.1: Default to supabase for team distribution — everyone shares same data
+STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "supabase")
 
 # Supabase credentials (only needed if STORAGE_BACKEND = "supabase")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
@@ -77,6 +78,7 @@ MAX_REFINEMENT_ATTEMPTS_PER_BASE = 5   # v6.0: was 10 — logs show 10+ attempts
 MAX_CORE_SIGNAL_EXHAUSTIONS = 2  # v6.0: was 3 — same core through different candidates wastes sims
 MAX_FAMILY_TEMPLATE_EXHAUSTIONS = 2  # v6.0: was 3 — m7c_03 exhausted 12 times in overnight run
 MAX_REFINEMENT_PER_CORE = 15  # v6.0: hard cap on total refinement sims per core signal across ALL candidates
+MAX_SUBMISSIONS_PER_CORE = 3  # v6.0.1: allow up to 3 variants of same core before blocking (WQ accepts different post-processing)
 LOCAL_REFINEMENT_HISTORY = 10
 LOCAL_REFINEMENT_MAX_SIMILARITY = 0.90
 

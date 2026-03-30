@@ -49,8 +49,9 @@ class AlphaBot:
         self.concentrated_weight_exprs: set[str] = set()  # v5.5: canonical expressions that fail CONCENTRATED_WEIGHT
         # v5.8: Track FIELDS that cause CW when unweighted — prevents fscore waste
         self.concentrated_weight_fields: set[str] = set()
-        # v5.9.1: Core signals that already passed — skip variants before simulation
-        self.passed_cores: set[str] = set()
+        # v6.0.1: Core signals that already passed — track COUNT, allow up to N variants
+        # WQ self-correlation accepts different post-processing of same core (e.g. ts_rank vs ts_mean)
+        self.passed_cores: dict[str, int] = {}  # core_signal → number of times passed
         # v6.0: Track refinement attempts per CORE SIGNAL to prevent same expression via different candidates
         self.refinement_attempts_by_core: dict[str, int] = {}
         # v6.0: Track recently simulated LLM expressions to prevent duplicates
@@ -71,6 +72,52 @@ class AlphaBot:
             print("[LLM] LLM generator available — will mix LLM candidates with templates")
         else:
             print("[LLM] No API keys found (GEMINI_API_KEY / GROQ_API_KEY) — template-only mode")
+
+        # v6.0.1: Warm-start session state from database — persists across restarts & team members
+        self._warm_start_from_history()
+
+    # =========================================================
+    # Warm-start from persistent history
+    # =========================================================
+
+    def _warm_start_from_history(self):
+        """
+        v6.0.1: Load session state from database so knowledge persists across
+        restarts and across team members sharing the same Supabase backend.
+        """
+        # 1. Load passed cores from submitted alphas (count per core)
+        try:
+            submitted_rows = self.storage.get_submitted_candidate_rows(limit=500)
+            for row in submitted_rows:
+                core = self._extract_core_signal(row.get("canonical_expression", ""))
+                if core:
+                    self.passed_cores[core] = self.passed_cores.get(core, 0) + 1
+            if self.passed_cores:
+                print(f"[WARM_START] Loaded {len(self.passed_cores)} passed cores from submitted alphas")
+        except Exception as exc:
+            print(f"[WARM_START] Failed to load passed cores: {exc}")
+
+        # 2. Load concentrated weight blacklist from historical failures
+        try:
+            cw_exprs = self.storage.get_concentrated_weight_failures(limit=500)
+            known_cw_fields = {
+                "short_interest", "days_to_cover", "utilization_rate",
+                "institutional_ownership", "put_call_ratio",
+                "insider_", "lending_fee",
+            }
+            for expr in cw_exprs:
+                self.concentrated_weight_exprs.add(expr)
+                expr_lower = expr.lower()
+                for field in known_cw_fields:
+                    if field in expr_lower:
+                        self.concentrated_weight_fields.add(field)
+            if self.concentrated_weight_exprs:
+                print(
+                    f"[WARM_START] Loaded {len(self.concentrated_weight_exprs)} CW-blacklisted expressions, "
+                    f"{len(self.concentrated_weight_fields)} CW-blacklisted fields"
+                )
+        except Exception as exc:
+            print(f"[WARM_START] Failed to load CW blacklist: {exc}")
 
     # =========================================================
     # Main loop
@@ -235,16 +282,18 @@ class AlphaBot:
         # check be the judge. v5.4 blocked 6 eligible alphas that may have passed.
         # The data-category proxy was wrong — cost us real submissions.
         if decision.should_submit:
-            # v5.9.1: Record core signal so we skip future variants BEFORE simulation
+            # v6.0.1: Record core signal — count submissions per core
             candidate_row = self.storage.get_candidate_by_id(candidate_id)
             if candidate_row:
                 core = self._extract_core_signal(candidate_row.get("canonical_expression", ""))
-                if core and core not in self.passed_cores:
-                    self.passed_cores.add(core)
+                if core:
+                    self.passed_cores[core] = self.passed_cores.get(core, 0) + 1
+                    max_per_core = getattr(config, "MAX_SUBMISSIONS_PER_CORE", 3)
+                    count = self.passed_cores[core]
                     print(
                         f"[CORE_PASSED] core='{core[:80]}' "
-                        f"total_passed_cores={len(self.passed_cores)} — "
-                        f"future variants will be skipped before simulation"
+                        f"count={count}/{max_per_core} "
+                        f"total_unique_cores={len(self.passed_cores)}"
                     )
 
             # Log data category for analytics (but NEVER block)
@@ -1206,8 +1255,12 @@ class AlphaBot:
                                 refinement_row["canonical_expression"],
                                 settings_override=suggested,
                             )
+                            # v6.0: Preserve original family/template for tracking
+                            candidate.family = refinement_row.get("family", candidate.family)
+                            candidate.template_id = refinement_row.get("template_id", candidate.template_id)
                             print(
                                 f"[OPTUNA_REFINE] base={base_candidate_id[:30]} "
+                                f"family={candidate.family} template={candidate.template_id} "
                                 f"S={refinement_row['base_sharpe']:.2f} F={refinement_row['base_fitness']:.2f} "
                                 f"→ univ={suggested['universe']} neut={suggested['neutralization']} "
                                 f"decay={suggested['decay']} trunc={suggested['truncation']}"
@@ -1311,17 +1364,17 @@ class AlphaBot:
                         )
                         continue
 
-            # v5.9.1: Skip candidates whose core signal already passed
-            # This prevents simulating 23 smoothing variants of the same expression.
-            # Saves ~3 min per variant that would just get rejected by WQ self-correlation.
+            # v6.0.1: Log if candidate shares core with already-submitted alpha
+            # but NEVER block — WQ's self-correlation check is the authority.
+            # Failed submissions don't count against daily cap. Better to waste a sim
+            # than miss an alpha. Rejections are logged in Supabase with self_corr value.
             if self.passed_cores:
                 core = self._extract_core_signal(candidate.canonical_expression)
-                if core in self.passed_cores:
+                if core and self.passed_cores.get(core, 0) >= 1:
                     print(
-                        f"[CORE_DEDUP] template={candidate.template_id} family={candidate.family} "
-                        f"core='{core[:60]}' — already passed, skipping variant"
+                        f"[CORE_OVERLAP] template={candidate.template_id} family={candidate.family} "
+                        f"core='{core[:60]}' — {self.passed_cores[core]} already submitted, simulating anyway"
                     )
-                    continue
 
             try:
                 self.storage.insert_candidate(candidate)

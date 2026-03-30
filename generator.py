@@ -92,18 +92,15 @@ class AlphaGenerator:
         template_id = f"llm_{family[:4]}"
 
         if settings_override:
-            # v6.0: Optuna-suggested settings — build Settings object directly
-            from models import Settings
-            settings = Settings(
+            # v6.0: Optuna-suggested settings — build SimulationSettings object directly
+            from models import SimulationSettings
+            settings = SimulationSettings(
                 region="USA",
                 universe=settings_override.get("universe", "TOP3000"),
                 delay=1,
                 decay=int(settings_override.get("decay", 6)),
                 neutralization=settings_override.get("neutralization", "SUBINDUSTRY"),
                 truncation=float(settings_override.get("truncation", 0.08)),
-                pasteurization="ON",
-                unit_handling="VERIFY",
-                nan_handling="OFF",
             )
         else:
             settings = self._sample_settings(family, settings_bias=settings_bias)

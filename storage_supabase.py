@@ -535,6 +535,35 @@ class Storage:
                         return results
         return results
 
+    def get_concentrated_weight_failures(self, *, limit: int = 500) -> list[str]:
+        """v6.0.1: Get canonical expressions that failed CONCENTRATED_WEIGHT check."""
+        mets = self._get("metrics", {
+            "select": "run_id",
+            "fail_reason": "like.*CONCENTRATED_WEIGHT*",
+            "limit": str(limit),
+        })
+        if not mets:
+            return []
+
+        expressions = set()
+        for m in mets:
+            rid = m["run_id"]
+            runs = self._get("runs", {
+                "select": "candidate_id",
+                "run_id": f"eq.{rid}",
+                "limit": "1",
+            })
+            if runs:
+                cid = runs[0]["candidate_id"]
+                cands = self._get("candidates", {
+                    "select": "canonical_expression",
+                    "candidate_id": f"eq.{cid}",
+                    "limit": "1",
+                })
+                if cands and cands[0].get("canonical_expression"):
+                    expressions.add(cands[0]["canonical_expression"])
+        return list(expressions)
+
 
 class _EmptyResult:
     """Stub for compatibility with raw SQL execute calls."""

@@ -917,3 +917,19 @@ class Storage:
             }
             for row in rows
         ]
+
+    def get_concentrated_weight_failures(self, *, limit: int = 500) -> list[str]:
+        """v6.0.1: Get canonical expressions that failed CONCENTRATED_WEIGHT check."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT c.canonical_expression
+                FROM metrics m
+                JOIN runs r ON m.run_id = r.run_id
+                JOIN candidates c ON r.candidate_id = c.candidate_id
+                WHERE m.fail_reason LIKE '%CONCENTRATED_WEIGHT%'
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [row["canonical_expression"] for row in rows]
