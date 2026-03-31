@@ -96,9 +96,17 @@ TEMPLATE_EXPLORATION_PROBABILITY = 0.10
 SOFT_PRUNE_REFINEMENT_PROBABILITY = 0.35
 
 # Submission behaviour
-# v6.1: AUTO_SUBMIT OFF — past 10k individual points, now in merged performance mode.
-# Bot finds eligible alphas, user reviews "Before/After Submission" on BRAIN website.
+# v6.2: Smart submission pipeline — checks self-corr + before-after via API,
+# refines settings with Optuna, picks best variant.
+# AUTO_SUBMIT=True  → submits best variant directly to WQ
+# AUTO_SUBMIT=False → stages best variant in ready_alphas table for manual submission
 AUTO_SUBMIT = False
+
+# v6.2: Number of Optuna settings variants to try per eligible alpha
+OPTIMIZE_VARIANTS = 5
+
+# v6.2: IQC competition ID for before-and-after-performance endpoint
+IQC_COMPETITION_ID = os.getenv("IQC_COMPETITION_ID", "IQC2026S1")
 
 # Submission diversity / self-correlation avoidance
 # Structural similarity threshold: if candidate > this vs any submitted alpha, flag as correlated

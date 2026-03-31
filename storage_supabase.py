@@ -618,6 +618,31 @@ class Storage:
             "owner": self.owner,
         })
 
+    def insert_ready_alpha(self, *, candidate_id, run_id, alpha_id, expression,
+                           core_signal, family, template_id, sharpe, fitness,
+                           turnover, score_before, score_after, score_change,
+                           settings_json, variant_desc):
+        """v6.2: Stage optimised alpha for manual submission."""
+        self._post("ready_alphas", {
+            "candidate_id": candidate_id,
+            "run_id": run_id,
+            "alpha_id": alpha_id,
+            "expression": expression,
+            "core_signal": core_signal,
+            "family": family,
+            "template_id": template_id,
+            "sharpe": sharpe,
+            "fitness": fitness,
+            "turnover": turnover,
+            "score_before": score_before,
+            "score_after": score_after,
+            "score_change": score_change,
+            "settings_json": settings_json,
+            "variant_desc": variant_desc,
+            "status": "ready",
+            "owner": self.owner,
+        })
+
 
 class _EmptyResult:
     """Stub for compatibility with raw SQL execute calls."""

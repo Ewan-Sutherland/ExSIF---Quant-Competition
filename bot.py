@@ -319,98 +319,12 @@ class AlphaBot:
         # check be the judge. v5.4 blocked 6 eligible alphas that may have passed.
         # The data-category proxy was wrong — cost us real submissions.
         if decision.should_submit:
-            # v6.0.1: Record core signal — count submissions per core
-            candidate_row = self.storage.get_candidate_by_id(candidate_id)
-            if candidate_row:
-                core = self._extract_core_signal(candidate_row.get("canonical_expression", ""))
-                if core:
-                    self.passed_cores[core] = self.passed_cores.get(core, 0) + 1
-                    max_per_core = getattr(config, "MAX_SUBMISSIONS_PER_CORE", 3)
-                    count = self.passed_cores[core]
-                    print(
-                        f"[CORE_PASSED] core='{core[:80]}' "
-                        f"count={count}/{max_per_core} "
-                        f"total_unique_cores={len(self.passed_cores)}"
-                    )
-
-            # Log data category for analytics (but NEVER block)
-            portfolio_info = self._check_submission_portfolio_fit(
-                candidate_id=candidate_id,
-                run_id=run_id,
-                sharpe=metrics.sharpe,
-            )
-
-            cat_info = portfolio_info.get("reason", "unknown")
-            max_sim = portfolio_info.get("max_similarity", 0.0)
-
-            if portfolio_info["fits"]:
-                print(
-                    f"[ELIGIBLE_DIVERSE] run_id={run_id} candidate_id={candidate_id} "
-                    f"max_sim={max_sim:.3f} "
-                    f"category_info={cat_info}"
-                )
-            else:
-                # v5.5: Log the warning but submit anyway
-                print(
-                    f"[ELIGIBLE_MAYBE_CORRELATED] run_id={run_id} candidate_id={candidate_id} "
-                    f"max_sim={max_sim:.3f} "
-                    f"category_info={cat_info} "
-                    f"SUBMITTING ANYWAY — let WQ decide"
-                )
-
-            if config.AUTO_SUBMIT:
-                # v6.1: Skip submission if this core was already rejected by WQ
-                skip_core = None
-                if candidate_row:
-                    core = self._extract_core_signal(candidate_row.get("canonical_expression", ""))
-                    if core and core in self.rejected_cores:
-                        skip_core = core
-
-                if skip_core:
-                    self.storage.insert_submission(
-                        submission_id=new_id("sub"),
-                        candidate_id=candidate_id,
-                        run_id=run_id,
-                        submitted_at=utc_now(),
-                        submission_status="skipped_self_corr",
-                        message=f"skipped: core already rejected by WQ — '{skip_core[:60]}'",
-                    )
-                    print(
-                        f"[SUBMIT_SKIP_CORR] run_id={run_id} "
-                        f"core='{skip_core[:60]}' — already rejected by WQ, skipping API call"
-                    )
-                else:
-                    self._attempt_submission(candidate_id, run_id, result)
-            else:
-                # v6.1: AUTO_SUBMIT off — add to review queue for manual decision
-                core = None
-                if candidate_row:
-                    core = self._extract_core_signal(candidate_row.get("canonical_expression", ""))
-                    # Skip adding to review queue if core already rejected
-                    if core and core in self.rejected_cores:
-                        print(
-                            f"[REVIEW_SKIP_CORR] run_id={run_id} "
-                            f"core='{core[:60]}' — already rejected, not adding to review queue"
-                        )
-                    else:
-                        import json as _json
-                        self.storage.insert_review_queue(
-                            candidate_id=candidate_id,
-                            run_id=run_id,
-                            expression=candidate_row.get("canonical_expression", ""),
-                            core_signal=core or "",
-                            family=candidate_row.get("family", ""),
-                            template_id=candidate_row.get("template_id", ""),
-                            sharpe=metrics.sharpe,
-                            fitness=metrics.fitness,
-                            turnover=metrics.turnover,
-                            settings_json=candidate_row.get("settings_json", "{}"),
-                        )
-                        print(
-                            f"[REVIEW_QUEUED] run_id={run_id} S={metrics.sharpe:.2f} F={metrics.fitness:.2f} "
-                            f"family={candidate_row.get('family','')} core='{(core or '')[:60]}' "
-                            f"— check Before/After on BRAIN website"
-                        )
+            try:
+                self._optimize_and_submit(candidate_id, run_id, result, metrics)
+            except Exception as exc:
+                print(f"[OPTIMIZE_ERROR] run_id={run_id} error={exc}")
+                import traceback
+                traceback.print_exc()
 
         if self.completed_runs % config.REPORT_EVERY_N_COMPLETIONS == 0:
             self._print_progress_report()
@@ -592,6 +506,336 @@ class AlphaBot:
                 message=str(exc)[:500],
             )
             print(f"[SUBMIT_ERROR] run_id={run_id} alpha_id={alpha_id} error={exc}")
+
+    def _extract_alpha_id(self, result: dict) -> str | None:
+        """Extract alpha_id from simulation result."""
+        return (
+            result.get("alpha_id")
+            or result.get("raw", {}).get("alpha_id")
+            or result.get("raw", {}).get("id")
+            or result.get("raw", {}).get("alpha")
+        )
+
+    def _optimize_and_submit(self, candidate_id: str, run_id: str, result: dict, metrics) -> None:
+        """
+        v6.2: Smart submission pipeline.
+
+        1. Check self-correlation via API (only gate — no before-after yet)
+        2. If passes → generate Optuna settings variants
+        3. Simulate each variant (blocking)
+        4. For each passing variant → check self-corr + before-after
+        5. Also check before-after for original
+        6. Pick variant with highest positive score change
+        7. AUTO_SUBMIT=True → submit to WQ
+           AUTO_SUBMIT=False → insert into ready_alphas table for manual submission
+        """
+        import json as _json
+
+        candidate_row = self.storage.get_candidate_by_id(candidate_id)
+        if not candidate_row:
+            print(f"[OPTIMIZE_SKIP] candidate {candidate_id} not found in storage")
+            return
+
+        expression = candidate_row.get("canonical_expression", "")
+        core = self._extract_core_signal(expression)
+        family = candidate_row.get("family", "")
+
+        # Skip if core already rejected
+        if core and core in self.rejected_cores:
+            print(
+                f"[OPTIMIZE_SKIP_CORR] run_id={run_id} "
+                f"core='{core[:60]}' — already rejected by WQ"
+            )
+            return
+
+        # ── Step 1: Check self-correlation ONLY (the only gate) ──
+        alpha_id = self._extract_alpha_id(result)
+        if not alpha_id:
+            print(f"[OPTIMIZE_SKIP] run_id={run_id} — no alpha_id found")
+            return
+
+        print(
+            f"\n{'='*60}\n"
+            f"[OPTIMIZE_START] S={metrics.sharpe:.2f} F={metrics.fitness:.2f} "
+            f"family={family}\n"
+            f"  expr={expression[:100]}\n"
+            f"  Checking self-correlation..."
+        )
+
+        check = self.client.check_alpha(alpha_id)
+
+        if check["_passed"] is False:
+            if core:
+                self.rejected_cores.add(core)
+            print(
+                f"[OPTIMIZE_CORR_FAIL] ❌ Self-correlation failed "
+                f"(corr={check['_self_correlation']}, with={check['_correlated_with']})\n"
+                f"{'='*60}\n"
+            )
+            return
+
+        if check["_passed"] is None:
+            print(f"[OPTIMIZE_CORR_TIMEOUT] ⚠️ Check timed out, skipping\n{'='*60}\n")
+            return
+
+        print(f"  ✅ Self-correlation PASSED — expression is viable, optimising settings...")
+
+        # ── Step 2: Generate settings variants + simulate ──
+        # Track all viable variants for comparison at the end
+        variants = []
+
+        # Include original as a candidate
+        variants.append({
+            "alpha_id": alpha_id,
+            "change": None,  # Will check before-after later
+            "sharpe": metrics.sharpe,
+            "fitness": metrics.fitness,
+            "desc": "original",
+            "candidate_id": candidate_id,
+            "run_id": run_id,
+            "settings_json": candidate_row.get("settings_json", "{}"),
+        })
+
+        n_variants = getattr(config, "OPTIMIZE_VARIANTS", 5)
+
+        if _HAS_OPTUNA and self.optimizer:
+            print(f"  Generating {n_variants} Optuna settings variants...")
+
+            base_settings_raw = candidate_row.get("settings_json", "{}")
+            if isinstance(base_settings_raw, str):
+                try:
+                    base_settings = _json.loads(base_settings_raw)
+                except:
+                    base_settings = {}
+            else:
+                base_settings = base_settings_raw or {}
+
+            tried_combos = set()
+            generated = 0
+
+            for i in range(n_variants * 3):
+                if generated >= n_variants:
+                    break
+
+                suggestion = self.optimizer.suggest(
+                    expression=expression,
+                    core_signal=core or "",
+                    family=family,
+                )
+
+                if suggestion is None:
+                    break
+
+                combo_key = (
+                    suggestion.get("universe"),
+                    suggestion.get("neutralization"),
+                    suggestion.get("decay"),
+                    suggestion.get("truncation"),
+                )
+                if combo_key in tried_combos:
+                    continue
+                tried_combos.add(combo_key)
+
+                variant_settings = {**base_settings, **suggestion}
+                variant_settings.setdefault("region", "USA")
+                variant_settings.setdefault("delay", 1)
+                variant_settings.setdefault("pasteurization", "ON")
+                variant_settings.setdefault("unit_handling", "VERIFY")
+                variant_settings.setdefault("nan_handling", "OFF")
+                variant_settings.setdefault("language", "FASTEXPR")
+
+                desc = (
+                    f"{suggestion.get('universe','?')}/"
+                    f"{suggestion.get('neutralization','?')}/"
+                    f"d{suggestion.get('decay','?')}/"
+                    f"t{suggestion.get('truncation','?')}"
+                )
+
+                print(f"  [Variant {generated+1}] {desc} — simulating...")
+
+                try:
+                    sim_id = self.client.submit_simulation(expression, variant_settings)
+                    variant_result = self.client.wait_for_completion(
+                        sim_id, poll_interval_seconds=8, timeout_minutes=5,
+                    )
+                except Exception as exc:
+                    print(f"    ⚠️ Sim failed: {exc}")
+                    continue
+
+                if variant_result["status"] != "completed":
+                    print(f"    ⚠️ Sim status: {variant_result['status']}")
+                    continue
+
+                v_metrics = parse_metrics(f"opt_{generated}", variant_result)
+                if not v_metrics.submit_eligible:
+                    print(
+                        f"    ⚠️ Not eligible: S={v_metrics.sharpe:.2f} F={v_metrics.fitness:.2f} "
+                        f"({v_metrics.fail_reason})"
+                    )
+                    continue
+
+                v_alpha_id = self._extract_alpha_id(variant_result)
+                if not v_alpha_id:
+                    print(f"    ⚠️ No alpha_id in result")
+                    continue
+
+                print(
+                    f"    ✅ Eligible: S={v_metrics.sharpe:.2f} F={v_metrics.fitness:.2f} "
+                    f"T={v_metrics.turnover:.3f}"
+                )
+
+                # Check self-correlation for variant
+                v_check = self.client.check_alpha(v_alpha_id)
+                if v_check["_passed"] is not True:
+                    print(f"    ❌ Self-corr failed (corr={v_check['_self_correlation']})")
+                    continue
+
+                print(f"    ✅ Self-corr passed (corr={v_check['_self_correlation']})")
+
+                variants.append({
+                    "alpha_id": v_alpha_id,
+                    "change": None,
+                    "sharpe": v_metrics.sharpe,
+                    "fitness": v_metrics.fitness,
+                    "desc": desc,
+                    "candidate_id": candidate_id,
+                    "run_id": run_id,
+                    "settings_json": _json.dumps(variant_settings),
+                })
+                generated += 1
+
+        # ── Step 3: Check before-after for ALL viable variants ──
+        print(f"\n  Checking merged performance for {len(variants)} viable variant(s)...")
+
+        for v in variants:
+            perf = self.client.check_before_after_performance(
+                v["alpha_id"], competition_id=config.IQC_COMPETITION_ID,
+            )
+            v["change"] = perf.get("_change")
+            v["before"] = perf.get("_before_score")
+            v["after"] = perf.get("_after_score")
+
+            if v["change"] is not None:
+                direction = "📈" if v["change"] > 0 else "📉" if v["change"] < 0 else "➡️"
+                print(
+                    f"  {direction} {v['desc']}: {v['before']} → {v['after']} "
+                    f"(change: {v['change']:+.0f}) S={v['sharpe']:.2f} F={v['fitness']:.2f}"
+                )
+            else:
+                print(
+                    f"  ⚠️ {v['desc']}: before-after unavailable "
+                    f"S={v['sharpe']:.2f} F={v['fitness']:.2f}"
+                )
+
+        # ── Step 4: Pick best and submit or stage ──
+        positive = [v for v in variants if v["change"] is not None and v["change"] > 0]
+
+        if positive:
+            best = max(positive, key=lambda v: v["change"])
+            print(
+                f"\n  🏆 BEST: {best['desc']} — change={best['change']:+.0f} "
+                f"S={best['sharpe']:.2f} F={best['fitness']:.2f}"
+            )
+
+            if config.AUTO_SUBMIT:
+                # Submit directly to WQ
+                print(f"  Submitting alpha_id={best['alpha_id']}...")
+                sub_result = self.client.submit_alpha(best["alpha_id"])
+                accepted = sub_result.get("_accepted")
+
+                if accepted is True:
+                    self.storage.insert_submission(
+                        submission_id=new_id("sub"),
+                        candidate_id=best["candidate_id"],
+                        run_id=best["run_id"],
+                        submitted_at=utc_now(),
+                        submission_status="confirmed",
+                        message=(
+                            f"auto-optimized: {best['desc']} change={best['change']:+.0f} "
+                            f"S={best['sharpe']:.2f} F={best['fitness']:.2f}"
+                        ),
+                    )
+                    if core:
+                        self.passed_cores[core] = self.passed_cores.get(core, 0) + 1
+                    print(
+                        f"  ✅ SUBMITTED — score change: {best['change']:+.0f}\n"
+                        f"{'='*60}\n"
+                    )
+                elif accepted is False:
+                    fail_reason = sub_result.get("_fail_reason", "unknown")
+                    self.storage.insert_submission(
+                        submission_id=new_id("sub"),
+                        candidate_id=best["candidate_id"],
+                        run_id=best["run_id"],
+                        submitted_at=utc_now(),
+                        submission_status="rejected",
+                        message=f"rejected at submit: {fail_reason}",
+                    )
+                    if "SELF_CORRELATION" in str(fail_reason).upper() and core:
+                        self.rejected_cores.add(core)
+                    print(
+                        f"  ❌ Rejected at submit: {fail_reason}\n"
+                        f"{'='*60}\n"
+                    )
+                else:
+                    print(f"  ⚠️ Submit timeout/unknown\n{'='*60}\n")
+            else:
+                # AUTO_SUBMIT=False → stage in ready_alphas table
+                self.storage.insert_ready_alpha(
+                    candidate_id=best["candidate_id"],
+                    run_id=best["run_id"],
+                    alpha_id=best["alpha_id"],
+                    expression=expression,
+                    core_signal=core or "",
+                    family=family,
+                    template_id=candidate_row.get("template_id", ""),
+                    sharpe=best["sharpe"],
+                    fitness=best["fitness"],
+                    turnover=metrics.turnover,
+                    score_before=best.get("before"),
+                    score_after=best.get("after"),
+                    score_change=best["change"],
+                    settings_json=best.get("settings_json", "{}"),
+                    variant_desc=best["desc"],
+                )
+                print(
+                    f"  📋 STAGED in ready_alphas — change={best['change']:+.0f} "
+                    f"(submit manually on BRAIN website)\n"
+                    f"{'='*60}\n"
+                )
+
+        else:
+            # No positive change — stage best unknown if any
+            unknown = [v for v in variants if v["change"] is None]
+            if unknown:
+                best_unk = max(unknown, key=lambda v: v["sharpe"])
+                self.storage.insert_ready_alpha(
+                    candidate_id=best_unk["candidate_id"],
+                    run_id=best_unk["run_id"],
+                    alpha_id=best_unk["alpha_id"],
+                    expression=expression,
+                    core_signal=core or "",
+                    family=family,
+                    template_id=candidate_row.get("template_id", ""),
+                    sharpe=best_unk["sharpe"],
+                    fitness=best_unk["fitness"],
+                    turnover=metrics.turnover,
+                    score_before=None,
+                    score_after=None,
+                    score_change=None,
+                    settings_json=best_unk.get("settings_json", "{}"),
+                    variant_desc=best_unk["desc"] + " (perf_unknown)",
+                )
+                print(
+                    f"\n  ⚠️ No confirmed positive change. Best staged in ready_alphas "
+                    f"for manual review.\n"
+                    f"{'='*60}\n"
+                )
+            else:
+                print(
+                    f"\n  📉 ALL variants would hurt score — skipping.\n"
+                    f"{'='*60}\n"
+                )
 
     def _check_submission_portfolio_fit(
         self,

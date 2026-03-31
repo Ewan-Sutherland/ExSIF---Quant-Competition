@@ -355,6 +355,192 @@ class BrainClient:
             "_fail_reason": "polling_timeout",
         }
 
+    def check_alpha(self, alpha_id: str) -> dict[str, Any]:
+        """
+        v6.1: Check self-correlation WITHOUT submitting.
+
+        Uses GET /alphas/{id}/check (from F12 network capture 2026-03-31).
+        Same response format as submit, but alpha is NOT committed.
+
+        Returns dict with:
+          _passed: True/False/None
+          _checks: list of check results
+          _self_correlation: float or None
+          _correlated_with: alpha_id that caused correlation failure, or None
+          _fail_reason: string describing failure, or None
+        """
+        self.ensure_session()
+
+        check_url = f"{self.base_url}/alphas/{alpha_id}/check"
+
+        # ── Step 1: GET to initiate check ──
+        response = self.session.get(check_url, timeout=60)
+
+        if response.status_code == 401:
+            self.login()
+            response = self.session.get(check_url, timeout=60)
+
+        if response.status_code not in (200, 201, 202):
+            error_body = response.text[:500]
+            return {
+                "_passed": None,
+                "_checks": [],
+                "_self_correlation": None,
+                "_correlated_with": None,
+                "_fail_reason": f"check initiation failed: {response.status_code} {error_body}",
+            }
+
+        retry_after = float(response.headers.get("Retry-After", 1.0))
+
+        # ── Step 2: Poll for check results ──
+        max_polls = 30
+        poll_interval = max(retry_after, 1.0)
+
+        for poll_num in range(1, max_polls + 1):
+            time.sleep(poll_interval)
+
+            resp = self.session.get(check_url, timeout=30)
+
+            # 200 empty = still processing
+            if resp.status_code == 200 and len(resp.text.strip()) == 0:
+                continue
+
+            # 200 with JSON = PASSED, 403 with JSON = FAILED
+            if resp.status_code in (200, 403) and len(resp.text.strip()) > 0:
+                try:
+                    data = resp.json()
+                except ValueError:
+                    continue
+
+                checks = data.get("is", {}).get("checks", [])
+                if not checks:
+                    continue
+
+                failed_checks = []
+                all_checks = []
+                self_corr_value = None
+                correlated_with = None
+
+                for check in checks:
+                    name = check.get("name", "?")
+                    result = check.get("result", "?")
+                    value = check.get("value")
+                    limit = check.get("limit")
+
+                    all_checks.append(check)
+
+                    if result == "PENDING":
+                        break
+
+                    if result == "FAIL":
+                        failed_checks.append(check)
+                        if name == "SELF_CORRELATION" and value is not None:
+                            self_corr_value = float(value)
+
+                    status_icon = "✅" if result == "PASS" else "❌" if result == "FAIL" else "⚠️"
+                    print(
+                        f"[CHECK] {status_icon} {name}: {result} "
+                        f"(value={value}, limit={limit})"
+                    )
+                else:
+                    self_correlated = data.get("is", {}).get("selfCorrelated", {})
+                    records = self_correlated.get("records", [])
+                    if records and len(records) > 0 and len(records[0]) > 0:
+                        correlated_with = records[0][0]
+                        if self_corr_value is None and len(records[0]) > 5:
+                            self_corr_value = records[0][5]
+
+                    passed = len(failed_checks) == 0
+                    return {
+                        "_passed": passed,
+                        "_checks": all_checks,
+                        "_self_correlation": self_corr_value,
+                        "_correlated_with": correlated_with,
+                        "_fail_reason": f"checks_failed:{','.join(c['name'] for c in failed_checks)}" if failed_checks else None,
+                    }
+
+                continue
+
+        return {
+            "_passed": None,
+            "_checks": [],
+            "_self_correlation": None,
+            "_correlated_with": None,
+            "_fail_reason": "polling_timeout",
+        }
+
+    def check_before_after_performance(self, alpha_id: str, competition_id: str = "IQC2026S1") -> dict[str, Any]:
+        """
+        v6.1: Check merged performance impact WITHOUT submitting.
+
+        Uses GET /competitions/{comp_id}/alphas/{alpha_id}/before-and-after-performance
+        (from F12 network capture 2026-03-31).
+
+        Returns dict with:
+          _before_score: float or None
+          _after_score: float or None
+          _change: float or None
+          _error: string or None
+        """
+        self.ensure_session()
+
+        url = f"{self.base_url}/competitions/{competition_id}/alphas/{alpha_id}/before-and-after-performance"
+
+        response = self.session.get(url, timeout=60)
+
+        if response.status_code == 401:
+            self.login()
+            response = self.session.get(url, timeout=60)
+
+        if response.status_code not in (200, 201, 202):
+            return {
+                "_before_score": None,
+                "_after_score": None,
+                "_change": None,
+                "_error": f"request failed: {response.status_code} {response.text[:200]}",
+            }
+
+        retry_after = float(response.headers.get("Retry-After", 1.0))
+
+        # Poll for results
+        max_polls = 20
+        poll_interval = max(retry_after, 1.0)
+
+        for poll_num in range(1, max_polls + 1):
+            time.sleep(poll_interval)
+
+            resp = self.session.get(url, timeout=30)
+
+            if resp.status_code == 200 and len(resp.text.strip()) == 0:
+                continue
+
+            if resp.status_code == 200 and len(resp.text.strip()) > 0:
+                try:
+                    data = resp.json()
+                except ValueError:
+                    continue
+
+                before = data.get("before")
+                after = data.get("after")
+                change = None
+                if before is not None and after is not None:
+                    change = after - before
+
+                return {
+                    "_before_score": before,
+                    "_after_score": after,
+                    "_change": change,
+                    "_raw": data,
+                    "_error": None,
+                }
+
+        return {
+            "_before_score": None,
+            "_after_score": None,
+            "_change": None,
+            "_error": "polling_timeout",
+        }
+
     def wait_for_completion(
         self,
         sim_id: str,
