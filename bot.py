@@ -711,15 +711,15 @@ class AlphaBot:
             perf = self.client.check_before_after_performance(
                 v["alpha_id"], competition_id=config.IQC_COMPETITION_ID,
             )
-            v["change"] = perf.get("_sharpe_change")
-            v["before"] = perf.get("_before_sharpe")
-            v["after"] = perf.get("_after_sharpe")
+            v["change"] = perf.get("_score_change")
+            v["before"] = perf.get("_score_before")
+            v["after"] = perf.get("_score_after")
 
             if v["change"] is not None:
                 direction = "📈" if v["change"] > 0 else "📉" if v["change"] < 0 else "➡️"
                 print(
-                    f"  {direction} {v['desc']}: Sharpe {v['before']:.2f} → {v['after']:.2f} "
-                    f"(change: {v['change']:+.4f}) S={v['sharpe']:.2f} F={v['fitness']:.2f}"
+                    f"  {direction} {v['desc']}: Score {v['before']:.0f} → {v['after']:.0f} "
+                    f"(change: {v['change']:+.0f}) S={v['sharpe']:.2f} F={v['fitness']:.2f}"
                 )
             else:
                 print(
@@ -728,12 +728,12 @@ class AlphaBot:
                 )
 
         # ── Step 4: Pick best and submit or stage ──
-        positive = [v for v in variants if v["change"] is not None and v["change"] > 0]
+        positive = [v for v in variants if v["change"] is not None and v["change"] >= 0]
 
         if positive:
-            best = max(positive, key=lambda v: v["change"])
+            best = max(positive, key=lambda v: (v["change"], v["sharpe"]))
             print(
-                f"\n  🏆 BEST: {best['desc']} — Sharpe change={best['change']:+.4f} "
+                f"\n  🏆 BEST: {best['desc']} — score change={best['change']:+.0f} "
                 f"S={best['sharpe']:.2f} F={best['fitness']:.2f}"
             )
 
@@ -751,14 +751,14 @@ class AlphaBot:
                         submitted_at=utc_now(),
                         submission_status="confirmed",
                         message=(
-                            f"auto-optimized: {best['desc']} Sharpe change={best['change']:+.4f} "
+                            f"auto-optimized: {best['desc']} score change={best['change']:+.0f} "
                             f"S={best['sharpe']:.2f} F={best['fitness']:.2f}"
                         ),
                     )
                     if core:
                         self.passed_cores[core] = self.passed_cores.get(core, 0) + 1
                     print(
-                        f"  ✅ SUBMITTED — merged Sharpe change: {best['change']:+.4f}\n"
+                        f"  ✅ SUBMITTED — score change: {best['change']:+.0f}\n"
                         f"{'='*60}\n"
                     )
                 elif accepted is False:
@@ -799,7 +799,7 @@ class AlphaBot:
                     variant_desc=best["desc"],
                 )
                 print(
-                    f"  📋 STAGED in ready_alphas — Sharpe change={best['change']:+.4f} "
+                    f"  📋 STAGED in ready_alphas — score change={best['change']:+.0f} "
                     f"(submit manually on BRAIN website)\n"
                     f"{'='*60}\n"
                 )

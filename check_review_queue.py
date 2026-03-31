@@ -93,10 +93,10 @@ def main():
             if perf["_error"]:
                 print(f"         ⚠️  Performance check failed: {perf['_error']}")
                 perf_note = "perf_check_failed"
-            elif perf["_sharpe_change"] is not None:
-                direction = "📈" if perf["_sharpe_change"] > 0 else "📉" if perf["_sharpe_change"] < 0 else "➡️"
-                print(f"         {direction} Merged Sharpe: {perf['_before_sharpe']:.2f} → {perf['_after_sharpe']:.2f} (change: {perf['_sharpe_change']:+.4f})")
-                perf_note = f"sharpe_before={perf['_before_sharpe']:.2f} sharpe_after={perf['_after_sharpe']:.2f} change={perf['_sharpe_change']:+.4f}"
+            elif perf["_score_change"] is not None:
+                direction = "📈" if perf["_score_change"] > 0 else "📉" if perf["_score_change"] < 0 else "➡️"
+                print(f"         {direction} IQC Score: {perf['_score_before']:.0f} → {perf['_score_after']:.0f} (change: {perf['_score_change']:+.0f})")
+                perf_note = f"score_before={perf['_score_before']:.0f} score_after={perf['_score_after']:.0f} change={perf['_score_change']:+.0f}"
             else:
                 perf_note = "perf_data_unavailable"
 

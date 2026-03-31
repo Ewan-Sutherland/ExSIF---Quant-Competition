@@ -494,17 +494,15 @@ class BrainClient:
 
         if response.status_code not in (200, 201, 202):
             return {
+                "_score_before": None,
+                "_score_after": None,
+                "_score_change": None,
                 "_before_sharpe": None,
                 "_after_sharpe": None,
-                "_sharpe_change": None,
                 "_before_fitness": None,
                 "_after_fitness": None,
                 "_before_pnl": None,
                 "_after_pnl": None,
-                "_before_returns": None,
-                "_after_returns": None,
-                "_before_drawdown": None,
-                "_after_drawdown": None,
                 "_raw": None,
                 "_error": f"request failed: {response.status_code} {response.text[:200]}",
             }
@@ -529,53 +527,46 @@ class BrainClient:
                 except ValueError:
                     continue
 
-                # Response format: {"partitionName": "EQUITY:1", "stats": {"before": {...}, "after": {...}}}
+                # Response has: stats (portfolio metrics), score (IQC points), competition, team
                 stats = data.get("stats", {})
                 before_stats = stats.get("before", {})
                 after_stats = stats.get("after", {})
 
-                if not before_stats or not after_stats:
-                    # Not the final response yet
-                    if not stats:
-                        continue
+                score = data.get("score", {})
+                score_before = score.get("before")
+                score_after = score.get("after")
 
-                before_sharpe = before_stats.get("sharpe")
-                after_sharpe = after_stats.get("sharpe")
-                before_fitness = before_stats.get("fitness")
-                after_fitness = after_stats.get("fitness")
+                if score_before is None and not before_stats:
+                    continue  # Not final response yet
 
-                sharpe_change = None
-                if before_sharpe is not None and after_sharpe is not None:
-                    sharpe_change = round(after_sharpe - before_sharpe, 4)
+                score_change = None
+                if score_before is not None and score_after is not None:
+                    score_change = round(score_after - score_before, 1)
 
                 return {
-                    "_before_sharpe": before_sharpe,
-                    "_after_sharpe": after_sharpe,
-                    "_sharpe_change": sharpe_change,
-                    "_before_fitness": before_fitness,
-                    "_after_fitness": after_fitness,
+                    "_score_before": score_before,
+                    "_score_after": score_after,
+                    "_score_change": score_change,
+                    "_before_sharpe": before_stats.get("sharpe"),
+                    "_after_sharpe": after_stats.get("sharpe"),
+                    "_before_fitness": before_stats.get("fitness"),
+                    "_after_fitness": after_stats.get("fitness"),
                     "_before_pnl": before_stats.get("pnl"),
                     "_after_pnl": after_stats.get("pnl"),
-                    "_before_returns": before_stats.get("returns"),
-                    "_after_returns": after_stats.get("returns"),
-                    "_before_drawdown": before_stats.get("drawdown"),
-                    "_after_drawdown": after_stats.get("drawdown"),
                     "_raw": data,
                     "_error": None,
                 }
 
         return {
+            "_score_before": None,
+            "_score_after": None,
+            "_score_change": None,
             "_before_sharpe": None,
             "_after_sharpe": None,
-            "_sharpe_change": None,
             "_before_fitness": None,
             "_after_fitness": None,
             "_before_pnl": None,
             "_after_pnl": None,
-            "_before_returns": None,
-            "_after_returns": None,
-            "_before_drawdown": None,
-            "_after_drawdown": None,
             "_raw": None,
             "_error": "polling_timeout",
         }
