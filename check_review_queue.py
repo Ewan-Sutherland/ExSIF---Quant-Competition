@@ -18,6 +18,7 @@ load_dotenv()
 
 from brain_client import BrainClient
 from storage_supabase import Storage
+import config
 
 
 def main():
@@ -31,7 +32,11 @@ def main():
         owner=os.getenv("BRAIN_USERNAME"),
     )
 
-    client = BrainClient()
+    client = BrainClient(
+        username=config.BRAIN_USERNAME,
+        password=config.BRAIN_PASSWORD,
+        base_url="https://api.worldquantbrain.com",
+    )
 
     # Fetch pending review queue entries
     rows = storage._get("review_queue", {

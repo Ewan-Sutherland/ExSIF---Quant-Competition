@@ -23,7 +23,11 @@ def main():
         sys.exit(1)
 
     alpha_id = sys.argv[1]
-    client = BrainClient()
+    client = BrainClient(
+        username=config.BRAIN_USERNAME,
+        password=config.BRAIN_PASSWORD,
+        base_url="https://api.worldquantbrain.com",
+    )
 
     # Test 1: Self-correlation check
     print(f"{'='*60}")
