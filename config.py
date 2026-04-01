@@ -103,7 +103,7 @@ SOFT_PRUNE_REFINEMENT_PROBABILITY = 0.35
 AUTO_SUBMIT = False
 
 # v6.2: Number of Optuna settings variants to try per eligible alpha
-OPTIMIZE_VARIANTS = 5
+OPTIMIZE_VARIANTS = 8
 
 # v6.2: IQC competition ID for before-and-after-performance endpoint
 IQC_COMPETITION_ID = os.getenv("IQC_COMPETITION_ID", "IQC2026S1")

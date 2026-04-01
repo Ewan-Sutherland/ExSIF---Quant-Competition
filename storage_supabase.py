@@ -571,13 +571,30 @@ class Storage:
         return list(expressions)
 
     def get_self_correlation_rejections(self, *, limit: int = 500) -> list[dict]:
-        """v6.1: Get candidates that were rejected by WQ for self-correlation."""
-        subs = self._get("submissions", {
-            "select": "candidate_id",
-            "submission_status": "eq.rejected",
-            "message": "like.*SELF_CORRELATION*",
-            "limit": str(limit),
-        })
+        """v6.1: Get candidates that were rejected by WQ for self-correlation.
+        Checks both submissions and submissions_archive tables."""
+        subs = []
+        # Check active submissions
+        try:
+            subs.extend(self._get("submissions", {
+                "select": "candidate_id",
+                "submission_status": "eq.rejected",
+                "message": "like.*SELF_CORRELATION*",
+                "limit": str(limit),
+            }) or [])
+        except Exception:
+            pass
+        # Also check archive
+        try:
+            subs.extend(self._get("submissions_archive", {
+                "select": "candidate_id",
+                "submission_status": "eq.rejected",
+                "message": "like.*SELF_CORRELATION*",
+                "limit": str(limit),
+            }) or [])
+        except Exception:
+            pass
+
         if not subs:
             return []
 

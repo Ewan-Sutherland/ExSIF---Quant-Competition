@@ -393,8 +393,8 @@ class BrainClient:
         retry_after = float(response.headers.get("Retry-After", 1.0))
 
         # ── Step 2: Poll for check results ──
-        max_polls = 30
-        poll_interval = max(retry_after, 1.0)
+        max_polls = 150
+        poll_interval = max(retry_after, 2.0)
 
         for poll_num in range(1, max_polls + 1):
             time.sleep(poll_interval)
@@ -436,13 +436,18 @@ class BrainClient:
                         failed_checks.append(check)
                         if name == "SELF_CORRELATION" and value is not None:
                             self_corr_value = float(value)
-
-                    status_icon = "✅" if result == "PASS" else "❌" if result == "FAIL" else "⚠️"
-                    print(
-                        f"[CHECK] {status_icon} {name}: {result} "
-                        f"(value={value}, limit={limit})"
-                    )
                 else:
+                    # All checks complete — print results
+                    for check in checks:
+                        name = check.get("name", "?")
+                        result = check.get("result", "?")
+                        value = check.get("value")
+                        limit = check.get("limit")
+                        status_icon = "✅" if result == "PASS" else "❌" if result == "FAIL" else "⚠️"
+                        print(
+                            f"[CHECK] {status_icon} {name}: {result} "
+                            f"(value={value}, limit={limit})"
+                        )
                     self_correlated = data.get("is", {}).get("selfCorrelated", {})
                     records = self_correlated.get("records", [])
                     if records and len(records) > 0 and len(records[0]) > 0:
