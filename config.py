@@ -197,8 +197,19 @@ FAMILY_BASE_WEIGHTS = {
     "momentum": 0.05,
     # v6.2.1: UNTAPPED DATA — virtually zero correlation with existing portfolio
     "vector_data": 3.00,    # vec_* operators on social/news vectors — proven S=1.94
-    "model_data": 2.50,     # mdf_*, mdl175_* — proven S=1.59, most competitors skip
-    "event_driven": 2.50,   # fnd6_*, fam_* — proven S=2.03 with forward EPS
+    "model_data": 0.01,     # v6.2.1: ALL mdf_*, mdl175_* fields DEAD on this account
+    "event_driven": 0.01,   # v6.2.1: ALL fnd6_*, fam_* fields DEAD on this account
+    # v6.2.1: NEW FAMILIES — 10 completely untapped data categories
+    "supply_chain": 4.00,       # pv13_* — 165 fields, ZERO submitted, academic backing, fewest users
+    "ravenpack_cat": 3.50,      # rp_css_*/rp_ess_* — 75 fields, ZERO submitted, novelty-weighted
+    "options_analytics": 3.00,  # call_breakeven/forward_price — 74 fields, ZERO submitted
+    "hist_vol": 2.50,           # historical_volatility vs IV spread — vol risk premium
+    "fscore": 2.50,             # fscore_bfl_* quality scores — 24 fields, proven factor
+    "risk_metrics": 2.50,       # beta/correlation/systematic risk — low-beta anomaly
+    "intraday_pattern": 2.00,   # open/high/low patterns — genuinely different data
+    "analyst_deep": 2.00,       # snt1_d1_earningstorpedo etc — deeper sentiment fields
+    "social_scalar": 1.50,      # scl12_buzz/sentiment scalar — ZERO submitted
+    "wild_combos": 1.50,        # cross-category novel interactions
 }
 
 TEMPLATE_BASE_WEIGHTS = {
@@ -280,6 +291,8 @@ TEMPLATE_WEIGHT_PENALTIES = {
     "m77_07": 0.05,
     "m77_08": 0.05,
     "m77_09": 0.05,
+    # v6.2.1: wp_05 core (operating_income/cap) has 3+ submissions — always blocked by CORE_OVERLAP
+    "wp_05": 0.01,
 }
 
 # v5.9.1: Boost model77_combo templates (near-passers at S=1.47)
@@ -455,11 +468,22 @@ SIGNAL_CLASS_SETTINGS = {
     "vector_data": {"universes": ["TOP3000", "TOP1000"], "neutralizations": ["SUBINDUSTRY", "MARKET"], "decays": [4, 6, 8, 10], "truncations": [0.05, 0.08]},
     "model_data": {"universes": ["TOP3000", "TOP1000"], "neutralizations": ["MARKET", "INDUSTRY", "SUBINDUSTRY"], "decays": [4, 6, 8], "truncations": [0.05, 0.08]},
     "event_driven": {"universes": ["TOP3000", "TOP1000"], "neutralizations": ["INDUSTRY", "SUBINDUSTRY"], "decays": [2, 4, 6], "truncations": [0.05, 0.08]},
+    # v6.2.1: 10 NEW untapped data families
+    "supply_chain": {"universes": ["TOP3000", "TOP1000"], "neutralizations": ["SUBINDUSTRY", "INDUSTRY"], "decays": [3, 5, 8], "truncations": [0.01, 0.08]},
+    "ravenpack_cat": {"universes": ["TOP3000", "TOP1000"], "neutralizations": ["SUBINDUSTRY", "MARKET", "INDUSTRY"], "decays": [6, 8, 10], "truncations": [0.05, 0.08]},
+    "options_analytics": {"universes": ["TOP3000", "TOP1000"], "neutralizations": ["MARKET", "SECTOR", "INDUSTRY"], "decays": [6, 8, 10], "truncations": [0.05, 0.08]},
+    "hist_vol": {"universes": ["TOP3000", "TOP1000"], "neutralizations": ["MARKET", "SECTOR"], "decays": [6, 8, 10], "truncations": [0.05, 0.08]},
+    "fscore": {"universes": ["TOP3000", "TOP1000"], "neutralizations": ["INDUSTRY", "SUBINDUSTRY", "MARKET"], "decays": [8, 10], "truncations": [0.08]},
+    "risk_metrics": {"universes": ["TOP3000", "TOP1000"], "neutralizations": ["MARKET", "INDUSTRY", "SUBINDUSTRY"], "decays": [6, 8, 10], "truncations": [0.01, 0.05]},
+    "intraday_pattern": {"universes": ["TOP3000", "TOP200"], "neutralizations": ["SECTOR", "MARKET"], "decays": [4, 6], "truncations": [0.08, 0.10]},
+    "analyst_deep": {"universes": ["TOP3000", "TOP1000"], "neutralizations": ["INDUSTRY", "SUBINDUSTRY"], "decays": [6, 8], "truncations": [0.08]},
+    "social_scalar": {"universes": ["TOP3000", "TOP1000"], "neutralizations": ["SUBINDUSTRY", "MARKET"], "decays": [4, 6, 8], "truncations": [0.08]},
+    "wild_combos": {"universes": ["TOP3000", "TOP1000"], "neutralizations": ["MARKET", "INDUSTRY", "SUBINDUSTRY"], "decays": [6, 8, 10], "truncations": [0.05, 0.08]},
 }
 
 # v5.7: Minimum exploration guarantee per family
 MIN_EXPLORATION_PER_FAMILY = 25
 
 # v5.9: LLM rate limit cooldown (seconds between calls)
-LLM_COOLDOWN_SECONDS = 60  # v6.1: Free tier — 10 RPM, 250 RPD. Groq fallback handles overflow
+LLM_COOLDOWN_SECONDS = 30  # v6.2.1: Reduced from 120s — key rotation handles per-key rate limits (60s each)
 LLM_AST_RETRY_MAX = 1      # v6.1: retry failed expressions once with error feedback

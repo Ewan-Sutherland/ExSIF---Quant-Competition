@@ -169,32 +169,55 @@ VALID_FIELDS.update({
     "est_sales", "est_netprofit", "est_dividend_ps",
 })
 
-# v6.2.1: Vector dataset fields (multiple values per stock per day — use vec_* operators)
+# v6.2.1: Vector dataset fields (multiple values per stock per day — use vec_avg/vec_sum ONLY)
 VALID_FIELDS.update({
     # Social media vectors
     "scl12_alltype_buzzvec", "scl12_alltype_sentvec",
-    "scl15_d1_sentiment",
     # News vectors
     "nws12_afterhsz_sl", "nws12_prez_result2",
-    # Fundamental event vectors
-    "fnd6_newqeventv110_optrfrq", "fnd6_epsfx",
+    # v6.2.1: scl15_d1_sentiment, fnd6_epsfx, fnd6_newqeventv110_optrfrq — ALL DEAD, removed
 })
 
-# v6.2.1: Model data fields (pre-computed proprietary signals — most competitors ignore these)
-VALID_FIELDS.update({
-    "mdf_nps",   # Net Piotroski Score
-    "mdf_oey",   # Operating Earnings Yield
-    "mdf_rds",   # R&D intensity score
-    "mdf_pbk",   # Model Price-to-Book
-    "mdf_eg3",   # 3-year earnings growth
-    "mdf_sg3",   # 3-year sales growth
-    "mdl175_volatility", "mdl175_revenuettm", "mdl175_grossprofit",
-})
+# v6.2.1: model_data (mdf_*), mdl175_*, fam_* — ALL DEAD on this account, removed from VALID_FIELDS
 
-# v6.2.1: Extended analyst/fundamental event fields
+# v6.2.1: New untapped fields for 10 new template families
 VALID_FIELDS.update({
-    "fam_earn_surp_pct",  # Earnings surprise percentage
-    "fam_roe_rank",       # ROE rank
+    # Supply chain (pv13)
+    "pv13_custretsig_retsig",
+    # RavenPack category sentiment
+    "rp_ess_insider", "rp_css_legal", "rp_nip_earnings", "nws18_event_relevance",
+    "rp_css_mna", "rp_ess_mna", "rp_css_revenue", "rp_ess_revenue",
+    "rp_css_product", "rp_ess_product", "rp_css_credit",
+    "rp_css_dividends", "rp_ess_dividends", "rp_nip_mna",
+    "rp_css_insider", "rp_nip_revenue", "rp_nip_legal",
+    # Options analytics — breakeven & forward price
+    "put_breakeven_30", "put_breakeven_60", "put_breakeven_90",
+    "put_breakeven_120", "put_breakeven_180",
+    "option_breakeven_30", "option_breakeven_60", "option_breakeven_90",
+    "option_breakeven_120", "option_breakeven_180",
+    # Fundamental scores (model16)
+    "fscore_bfl_growth", "fscore_bfl_surface",
+    "growth_potential_rank_derivative", "composite_factor_score_derivative",
+    "analyst_revision_rank_derivative", "cashflow_efficiency_rank_derivative",
+    "earnings_certainty_rank_derivative", "relative_valuation_rank_derivative",
+    "multi_factor_acceleration_score_derivative", "multi_factor_static_score_derivative",
+    # Risk metrics — full field names
+    "beta_last_30_days_spy", "beta_last_90_days_spy", "beta_last_360_days_spy",
+    "correlation_last_30_days_spy", "correlation_last_90_days_spy", "correlation_last_360_days_spy",
+    "systematic_risk_last_30_days", "systematic_risk_last_90_days", "systematic_risk_last_360_days",
+    "unsystematic_risk_last_30_days", "unsystematic_risk_last_90_days", "unsystematic_risk_last_360_days",
+    # Historical volatility
+    "historical_volatility_10", "historical_volatility_20", "historical_volatility_30",
+    "historical_volatility_60", "historical_volatility_90", "historical_volatility_120",
+    # Deep analyst sentiment
+    "snt1_d1_earningstorpedo", "snt1_d1_uptargetpercent", "snt1_d1_downtargetpercent",
+    "snt1_d1_analystcoverage", "snt1_d1_longtermepsgrowthest", "snt1_d1_stockrank",
+    "snt1_d1_earningsrevision", "snt1_d1_fundamentalfocusrank",
+    "snt1_cored1_score", "snt1_d1_netrecpercent", "snt1_d1_nettargetpercent",
+    # Social media scalar
+    "scl12_buzz", "scl12_buzz_fast_d1", "scl12_sentiment", "scl12_sentiment_fast_d1",
+    "snt_value", "snt_value_fast_d1", "snt_buzz_ret", "snt_buzz_ret_fast_d1",
+    "snt_buzz", "snt_buzz_fast_d1", "snt_buzz_bfl", "snt_buzz_bfl_fast_d1",
 })
 
 
@@ -202,19 +225,21 @@ VALID_FIELDS.update({
 
 VALID_OPERATORS = {
     "rank", "group_rank", "ts_mean", "ts_std_dev", "ts_zscore", "ts_rank",
-    "ts_delta", "ts_decay_linear", "ts_corr", "ts_sum", "ts_min", "ts_max",
-    "ts_argmin", "ts_argmax", "ts_arg_max", "ts_covariance", "ts_product", "ts_backfill",
+    "ts_delta", "ts_decay_linear", "ts_corr", "ts_sum",
+    "ts_arg_min", "ts_arg_max", "ts_covariance", "ts_product", "ts_backfill",
     "ts_count_nans", "ts_regression", "ts_step", "ts_delay", "ts_scale",
     "ts_quantile",
-    "trade_when", "abs", "log", "sign", "max", "min", "power",
+    "trade_when", "if_else",  # v6.2.1: if_else is base-level conditional (no position holding)
+    "abs", "log", "sign", "max", "min", "power",
     "is_nan", "bucket", "densify", "winsorize", "normalize",
     "group_neutralize", "group_zscore", "group_scale", "group_backfill", "group_mean",
     "scale", "quantile", "zscore",
-    "vec_avg", "vec_count", "vec_sum", "vec_max", "vec_min",
-    "vec_stddev", "vec_range", "vec_ir",
+    "vec_avg", "vec_sum",  # v6.2.1: ONLY these two vec_ operators work
     "signed_power", "sqrt", "inverse", "reverse", "hump",
-    "last_diff_value", "days_from_last_change", "kth_element",
-    "pasteurize",
+    # v6.2.1: removed ts_min, ts_max, ts_argmin, ts_argmax — DON'T EXIST on platform
+    # v6.2.1: last_diff_value, days_from_last_change — exist but LLM misuses them, kept banned
+    # v6.2.1: pasteurize — inaccessible at base level
+    "kth_element",
     "ts_av_diff",  # v6.2.1: ts_mean(x,n) - x — proven in mdf_eg3 alpha (S=1.59)
 }
 
@@ -227,6 +252,20 @@ BANNED_FIELDS = {
     "short_interest",      # not a valid field name
     "institutional_ownership",  # not available
     "put_call_ratio",      # use pcr_oi_30 etc. instead
+    # v6.2.1: ALL confirmed dead fields from overnight logs
+    "mdf_nps", "mdf_oey", "mdf_rds", "mdf_pbk", "mdf_eg3", "mdf_sg3",  # model_data family ALL dead
+    "mdl175_grossprofit", "mdl175_revenuettm", "mdl175_volatility",  # mdl175 ALL dead
+    "fnd6_epsfx",          # event_driven dead
+    "fam_earn_surp_pct", "fam_roe_rank",  # event_driven dead
+    "scl15_d1_sentiment",  # doesn't exist — not in any dataset
+}
+
+# v6.2.1: Operators that are inaccessible or broken at base level
+BANNED_OPERATORS = {
+    "vec_count", "vec_ir", "vec_max", "vec_min", "vec_stddev", "vec_range",  # only vec_avg and vec_sum work
+    "pasteurize",          # inaccessible at base level
+    "last_diff_value",     # needs lookback param we don't provide
+    "days_from_last_change",  # needs lookback param we don't provide
 }
 
 
@@ -241,19 +280,62 @@ Output ONLY raw FastExpression syntax — no Python, no pseudocode.
 THINKING PROCESS (follow this for EVERY expression)
 ═══════════════════════════════════════════════════
 
-Step 1: Pick a MARKET INEFFICIENCY to exploit. Examples:
-  - Post-earnings drift (investors underreact to earnings surprises)
-  - Value-momentum crash hedge (cheap stocks with improving momentum)
-  - Implied vs realized volatility gap (options market mispricing)
-  - Analyst herding (revision clusters predict returns)
-  - Liquidity premium (less liquid stocks earn higher returns)
-  - Supply chain contagion (customer returns predict supplier returns)
-  - Short-term mean reversion in high-volume stocks
-  - Quality flight during volatility regimes
+Step 1: Pick a MARKET INEFFICIENCY from the UNEXPLORED list below.
+  You MUST draw from these underexplored signal families — do NOT generate
+  signals from the SATURATED list at the bottom.
+
+  UNEXPLORED FAMILIES (prioritise in this order):
+  1. SUPPLY CHAIN (fewest users on entire platform — academic backing):
+     rel_ret_cust, rel_ret_comp, pv13_com_page_rank, pv13_custretsig_retsig
+     IDEA: Customer returns predict supplier returns with 5-20 day lag (Cohen & Frazzini)
+  2. RAVENPACK CATEGORY SENTIMENT (category-specific news, not generic):
+     rp_ess_mna, rp_ess_earnings, rp_css_credit, rp_css_legal, rp_ess_insider, rp_nip_earnings
+     IDEA: Novelty-weighted sentiment (rp_nip × rp_ess) outperforms raw sentiment
+     Always ts_backfill(field, 60) — sparse data
+  3. OPTIONS ANALYTICS (breakeven/forward price — almost nobody uses):
+     call_breakeven_30, call_breakeven_60, call_breakeven_120, forward_price_60
+     put_breakeven_30, put_breakeven_60, option_breakeven_60
+     IDEA: call_breakeven/close - 1 = where options market expects the stock
+  4. HISTORICAL VOLATILITY (vol risk premium — most robust anomaly in finance):
+     historical_volatility_20, historical_volatility_60, historical_volatility_90
+     implied_volatility_mean_60, implied_volatility_mean_skew_60
+     IDEA: IV/HV spread — stocks where IV >> HV have highest risk premium
+  5. RISK METRICS (low-beta anomaly — strongest cross-sectional factor):
+     beta_last_60_days_spy, unsystematic_risk_last_60_days, systematic_risk_last_60_days
+     correlation_last_30_days_spy, correlation_last_360_days_spy
+     IDEA: -rank(beta) = betting against beta; high idio vol stocks underperform
+  6. FUNDAMENTAL SCORES (pre-computed quality composites):
+     fscore_bfl_quality, fscore_bfl_total, fscore_bfl_value, fscore_bfl_profitability
+     growth_potential_rank_derivative, composite_factor_score_derivative
+     IDEA: ts_delta(fscore, 63) captures improving fundamentals. Sparse — use ts_backfill(field, 60)
+  7. DEEP ANALYST SENTIMENT (mostly untapped snt1_d1_* fields):
+     snt1_d1_earningstorpedo, snt1_d1_uptargetpercent, snt1_d1_downtargetpercent,
+     snt1_d1_analystcoverage, snt1_d1_longtermepsgrowthest, snt1_d1_stockrank
+     IDEA: -rank(earningstorpedo) shorts stocks at risk of breaking earnings streaks
+  8. SOCIAL MEDIA SCALAR (non-vector buzz/sentiment):
+     scl12_buzz, scl12_sentiment, snt_value, snt_buzz_ret
+     IDEA: High buzz + low sentiment = overreaction → short; Low buzz = opportunity → long
+  9. VECTOR DATA (use vec_avg/vec_sum ONLY):
+     scl12_alltype_buzzvec, scl12_alltype_sentvec, nws12_afterhsz_sl
+     PROVEN: ts_av_diff(ts_backfill(-vec_sum(scl12_alltype_buzzvec), 20), 60) → S=1.94
+  10. INTRADAY PATTERNS (open/high/low/close relationships):
+     IDEA: -(open - ts_delay(close,1)) = overnight gap reversal
+     IDEA: (close-open)/(high-low+0.001) = candle body ratio (buying pressure)
+  11. OPTIONS IV SPREAD (proven portfolio-additive):
+     implied_volatility_call_120 / parkinson_volatility_120 (PROVEN +48 score points)
+     pcr_oi_{30,60,180,270}, IV call-put spread
 
 Step 2: Choose 1-2 data fields that CAPTURE that inefficiency.
 Step 3: Apply the MINIMUM operators needed — simpler = better fitness.
 Step 4: Verify the expression is structurally different from the submitted list.
+
+ALREADY SATURATED — DO NOT USE AS PRIMARY SIGNAL:
+  debt, ts_zscore(debt, *), close/debt
+  ts_mean(returns, *), ts_zscore(returns, *), ts_decay_linear(rank(-rank(ts_zscore(returns,*))))
+  operating_income/cap, ts_rank(operating_income/cap, 252)
+  est_eps/close, group_rank(ts_rank(est_eps/close, 60), industry)
+  (close-vwap)/vwap as standalone signal
+  one_year_change_total_assets, asset_growth_rate as standalone
 
 ═══════════════════════════════════════════════════
 OPERATOR REFERENCE
@@ -270,13 +352,20 @@ TIME SERIES (per-stock):
   ts_delta(x, n), ts_decay_linear(x, n), ts_corr(x, y, n)
   ts_sum(x, n), ts_min(x, n), ts_max(x, n)
   ts_argmin(x, n), ts_argmax(x, n), ts_covariance(x, y, n)
-  ts_backfill(x, n)               — fill NaN (REQUIRED for options/news data)
+  ts_backfill(x, n)               — fill NaN (REQUIRED for options/news/social/model data)
   ts_regression(y, x, n, rettype) — rettype=2 for slope
   ts_step(n)                      — sequence 1..n for trend regression
   ts_scale(x, n)                  — scale to sum to 1
+  ts_av_diff(x, n)                — ts_mean(x,n) - x (mean deviation)
+
+VECTOR (for multi-value fields like buzzvec, sentvec, nws12):
+  vec_avg(x), vec_sum(x)  — ONLY these two work at base level
 
 CONDITIONAL:
-  trade_when(cond, x, default)    — use x when cond is true, else default
+  trade_when(cond, x, default)    — use x when cond is true, else default (holds position)
+  if_else(cond, x, y)             — returns x when cond is true, y when false (no position holding)
+
+OTHER: winsorize(x, std=4), densify(x), hump(x, hump=0.01) — hump reduces turnover (improves fitness)
 
 LOCKED — DO NOT USE: ts_skewness, ts_kurtosis, ts_momentum
 
@@ -292,7 +381,7 @@ FUNDAMENTAL (quarterly, use 60-252 day lookbacks):
   assets_curr, debt_lt, debt_st, depre_amort, employee, retained_earnings,
   operating_income, gross_profit, inventory_turnover, rd_expense
 
-FUNDAMENTAL SCORES (model16 — sparse coverage, use ts_backfill or multiply by rank(cap)):
+FUNDAMENTAL SCORES (model16 — sparse, use ts_backfill or multiply by rank(cap)):
   fscore_bfl_value, fscore_bfl_momentum, fscore_bfl_quality, fscore_bfl_growth,
   fscore_bfl_profitability, fscore_bfl_total, fscore_bfl_surface, fscore_bfl_surface_accel
 
@@ -326,46 +415,46 @@ SUPPLY CHAIN: rel_ret_cust, rel_ret_comp, rel_num_cust, rel_num_comp
 RISK: beta_last_60_days_spy, unsystematic_risk_last_60_days, systematic_risk_last_60_days
   (NOTE: always use the full field name with window suffix — bare "unsystematic_risk" is INVALID)
 
-MODEL DATA (mdf_* — pre-computed proprietary signals, most competitors skip these):
-  mdf_nps (Piotroski Score), mdf_oey (Operating Earnings Yield), mdf_rds (R&D intensity),
-  mdf_pbk (Price-to-Book), mdf_eg3 (3yr earnings growth), mdf_sg3 (3yr sales growth)
-  mdl175_volatility, mdl175_revenuettm, mdl175_grossprofit
-  ALWAYS wrap in ts_backfill(field, 60) — these are sparse.
-  PROVEN: -ts_av_diff(mdf_eg3, 50) * ts_corr(mdf_eg3, mdf_sg3, 50) → S=1.59, F=1.70
+VECTOR DATASETS (use vec_avg or vec_sum ONLY):
+  scl12_alltype_buzzvec, scl12_alltype_sentvec, nws12_afterhsz_sl
 
-VECTOR DATASETS (use vec_* operators — multiple values per stock per day):
-  scl12_alltype_buzzvec, scl12_alltype_sentvec, nws12_afterhsz_sl, scl15_d1_sentiment
-  Operators: vec_avg(x), vec_sum(x), vec_count(x), vec_max(x), vec_min(x), vec_ir(x)
-  Pattern: ts_backfill(vec_sum(scl12_alltype_buzzvec), 20) to aggregate, then rank/smooth.
-  PROVEN: ts_av_diff(ts_backfill(-vec_sum(scl12_alltype_buzzvec), 20), 60) → S=1.94, F=1.35
+HISTORICAL VOLATILITY (NEW — completely untapped):
+  historical_volatility_10, historical_volatility_20, historical_volatility_60, historical_volatility_90
 
-EVENT-DRIVEN (fnd6_*, fam_* — timing signals):
-  fnd6_epsfx (forward EPS), fam_earn_surp_pct (earnings surprise %), fam_roe_rank
-  Operators: days_from_last_change(x), last_diff_value(x), ts_av_diff(x, n)
-  PROVEN: rank(ts_rank(fnd6_epsfx/close, 40)) → S=2.03, F=1.58
+OPTIONS ANALYTICS (NEW — breakeven/forward price, almost nobody uses these):
+  call_breakeven_30, call_breakeven_60, call_breakeven_120
+  forward_price_30, forward_price_60, forward_price_120
+  put_breakeven_30, put_breakeven_60
+
+DEEP ANALYST SENTIMENT (NEW — mostly untapped):
+  snt1_d1_earningstorpedo, snt1_d1_uptargetpercent, snt1_d1_downtargetpercent,
+  snt1_d1_analystcoverage, snt1_d1_longtermepsgrowthest, snt1_d1_stockrank,
+  snt1_d1_earningsrevision, snt1_d1_fundamentalfocusrank
 
 ═══════════════════════════════════════════════════
 PATTERNS THAT ACTUALLY PASS (Sharpe > 1.25, Fitness > 1.0)
 ═══════════════════════════════════════════════════
 
-MULTI-FACTOR (the winning pattern — combine 2 DIFFERENT data sources):
+MULTI-FACTOR (combine 2 DIFFERENT data sources — prioritise cross-family):
   rank(signal_A * signal_B)          — multiplicative RAW (best — captures interaction effects)
   rank(signal_A) * rank(signal_B)    — multiplicative ranked (good)
   rank(signal_A) + rank(signal_B)    — additive (baseline, weaker than multiplicative)
-  Research shows multiplicative outperforms additive in 65%+ of backtests.
-  Component A: fundamental ratio, debt trend, earnings revision, options IV
-  Component B: short-term price reversion, vwap deviation, volume anomaly
+  IDEAL PAIRINGS (unexplored × already-working):
+    vector buzz × short-term reversion
+    model data × earnings revision
+    event timing × fundamental value
+    options IV ratio × volume anomaly
+    supply chain return × analyst sentiment
 
 CONDITIONAL ENTRY:
   trade_when(vol_condition, rank(signal), -1) — only trade during vol regimes
-  trade_when(volume > ts_mean(volume, 40), rank(-returns), -1)
 
 INDUSTRY-RELATIVE:
   group_rank(signal, industry)  — outperforms rank() for fundamentals 78% of the time
 
 CRITICAL RULES:
   1. Every expression MUST contain rank() or group_rank()
-  2. Options/news/sentiment data: ALWAYS wrap in ts_backfill(field, 60) first
+  2. Options/news/sentiment/social/model data: ALWAYS wrap in ts_backfill(field, 60) first
   3. Fundamental scores (fscore_*): ALWAYS multiply by rank(cap) or rank(adv20)
   4. Keep it simple: 1-3 nested calls. Complex = overfit = low fitness.
   5. Output ONLY the raw expression — no numbering, no explanation, no markdown
@@ -465,53 +554,102 @@ Just {num_expressions} lines of pure FastExpression code."""
 # ── API clients ──────────────────────────────────────────────────────
 
 class LLMClient:
-    """Handles API calls to Gemini and Groq with automatic fallback."""
+    """Handles API calls to Gemini and Groq with automatic fallback and key rotation."""
 
     def __init__(self):
-        self.gemini_key = os.environ.get("GEMINI_API_KEY", "")
-        self.groq_key = os.environ.get("GROQ_API_KEY", "")
-        self._gemini_calls_today = 0
-        self._groq_calls_today = 0
+        # v6.2.1: Support multiple Gemini API keys for rate limit rotation
+        # Set in .env as: GEMINI_API_KEYS=key1,key2,key3,key4,key5
+        # Falls back to single GEMINI_API_KEY if GEMINI_API_KEYS not set
+        multi_keys = os.environ.get("GEMINI_API_KEYS", "")
+        if multi_keys:
+            self.gemini_keys = [k.strip() for k in multi_keys.split(",") if k.strip()]
+        else:
+            single = os.environ.get("GEMINI_API_KEY", "")
+            self.gemini_keys = [single] if single else []
+
+        # Same for Groq — GROQ_API_KEYS=key1,key2 or single GROQ_API_KEY
+        multi_groq = os.environ.get("GROQ_API_KEYS", "")
+        if multi_groq:
+            self.groq_keys = [k.strip() for k in multi_groq.split(",") if k.strip()]
+        else:
+            single_groq = os.environ.get("GROQ_API_KEY", "")
+            self.groq_keys = [single_groq] if single_groq else []
+
+        # Per-key tracking
+        self._gemini_calls = [0] * len(self.gemini_keys)
+        self._gemini_rate_limited_until = [0.0] * len(self.gemini_keys)  # timestamp
+        self._groq_calls = [0] * len(self.groq_keys)
+        self._groq_rate_limited_until = [0.0] * len(self.groq_keys)
         self._last_reset_day = 0
-        # v6.2.1: Warn if Groq fallback is unavailable
-        if not self.groq_key:
-            print("[LLM_WARN] GROQ_API_KEY not set — no fallback when Gemini rate-limits!")
-        if not self.gemini_key:
-            print("[LLM_WARN] GEMINI_API_KEY not set — will try Groq only")
+
+        # Log key count
+        if self.gemini_keys:
+            print(f"[LLM] {len(self.gemini_keys)} Gemini API key(s) loaded — rotating on rate limit")
+        else:
+            print("[LLM_WARN] No GEMINI_API_KEY(S) set")
+        if self.groq_keys:
+            print(f"[LLM] {len(self.groq_keys)} Groq API key(s) loaded")
+        else:
+            print("[LLM_WARN] No GROQ_API_KEY(S) set — no fallback when Gemini rate-limits!")
+
+    @property
+    def gemini_key(self):
+        """Legacy compat — return first key or empty."""
+        return self.gemini_keys[0] if self.gemini_keys else ""
+
+    @property
+    def groq_key(self):
+        return self.groq_keys[0] if self.groq_keys else ""
 
     def _reset_daily_counters(self):
         today = int(time.time() // 86400)
         if today != self._last_reset_day:
-            self._gemini_calls_today = 0
-            self._groq_calls_today = 0
+            self._gemini_calls = [0] * len(self.gemini_keys)
+            self._groq_calls = [0] * len(self.groq_keys)
             self._last_reset_day = today
 
     def generate(self, system_prompt: str, user_prompt: str) -> str | None:
-        """Try Gemini first, fall back to Groq. Returns raw text or None."""
+        """Try all Gemini keys, then all Groq keys. Returns raw text or None."""
         self._reset_daily_counters()
+        now = time.time()
 
-        # Try Gemini (250 RPD limit — keep 10 buffer)
-        if self.gemini_key and self._gemini_calls_today < 240:
-            result = self._call_gemini(system_prompt, user_prompt)
-            if result is not None:
-                self._gemini_calls_today += 1
-                return result
+        # Try each Gemini key — skip rate-limited ones
+        for i, key in enumerate(self.gemini_keys):
+            if self._gemini_calls[i] >= 240:  # 250 RPD limit with buffer
+                continue
+            if now < self._gemini_rate_limited_until[i]:
+                continue  # still in cooldown for this key
 
-        # Fallback to Groq GPT-OSS 120B (1000 RPD limit)
-        if self.groq_key and self._groq_calls_today < 950:
-            result = self._call_groq(system_prompt, user_prompt)
+            result = self._call_gemini(key, system_prompt, user_prompt)
             if result is not None:
-                self._groq_calls_today += 1
+                self._gemini_calls[i] += 1
                 return result
+            else:
+                # Mark this key as rate-limited for 60s
+                self._gemini_rate_limited_until[i] = now + 60
+
+        # Fallback: try each Groq key
+        for i, key in enumerate(self.groq_keys):
+            if self._groq_calls[i] >= 950:  # 1000 RPD limit with buffer
+                continue
+            if now < self._groq_rate_limited_until[i]:
+                continue
+
+            result = self._call_groq(key, system_prompt, user_prompt)
+            if result is not None:
+                self._groq_calls[i] += 1
+                return result
+            else:
+                self._groq_rate_limited_until[i] = now + 60
 
         return None
 
-    def _call_gemini(self, system_prompt: str, user_prompt: str) -> str | None:
+    def _call_gemini(self, api_key: str, system_prompt: str, user_prompt: str) -> str | None:
         """Call Google Gemini 2.5 Flash via REST API."""
         try:
             url = (
                 f"https://generativelanguage.googleapis.com/v1beta/models/"
-                f"gemini-2.5-flash:generateContent?key={self.gemini_key}"
+                f"gemini-2.5-flash:generateContent?key={api_key}"
             )
             payload = {
                 "systemInstruction": {"parts": [{"text": system_prompt}]},
@@ -542,12 +680,12 @@ class LLMClient:
             print(f"[LLM] Gemini exception: {exc}")
             return None
 
-    def _call_groq(self, system_prompt: str, user_prompt: str) -> str | None:
+    def _call_groq(self, api_key: str, system_prompt: str, user_prompt: str) -> str | None:
         """Call Groq GPT-OSS 120B (OpenAI-compatible). Prompt caching is automatic."""
         try:
             url = "https://api.groq.com/openai/v1/chat/completions"
             headers = {
-                "Authorization": f"Bearer {self.groq_key}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             }
             payload = {
@@ -639,6 +777,11 @@ def validate_expression(expr: str) -> tuple[bool, str]:
     for banned in BANNED_FIELDS:
         if banned in expr_lower:
             return False, f"banned_field: {banned}"
+
+    # v6.2.1: Check for banned operators (inaccessible at base level)
+    for banned in BANNED_OPERATORS:
+        if banned + "(" in expr_lower:
+            return False, f"banned_operator: {banned}"
 
     # Must contain rank() somewhere
     if "rank" not in expr_lower and "group_rank" not in expr_lower:

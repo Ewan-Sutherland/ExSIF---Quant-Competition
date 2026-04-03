@@ -319,57 +319,122 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         # Social buzz vectors — proven pattern: aggregate then smooth
         {"template_id": "vec_01", "expression": "ts_av_diff(ts_backfill(-vec_sum(scl12_alltype_buzzvec), 20), 60)"},
         {"template_id": "vec_02", "expression": "rank(ts_backfill(vec_avg(scl12_alltype_sentvec), 20))"},
-        {"template_id": "vec_03", "expression": "rank(ts_backfill(vec_count(scl12_alltype_buzzvec), 20) * -returns)"},
         # News vectors — after-hours significance
         {"template_id": "vec_04", "expression": "rank(ts_backfill(vec_sum(nws12_afterhsz_sl), 20))"},
         {"template_id": "vec_05", "expression": "rank(ts_backfill(vec_avg(nws12_afterhsz_sl), 20) * -ts_mean(returns, {n}))"},
         # Buzz × sentiment interaction
         {"template_id": "vec_06", "expression": "rank(ts_backfill(vec_sum(scl12_alltype_buzzvec), 20) * ts_backfill(vec_avg(scl12_alltype_sentvec), 20))"},
         # Buzz IR (information ratio — signal-to-noise of social media)
-        {"template_id": "vec_07", "expression": "rank(ts_backfill(vec_ir(scl12_alltype_buzzvec), 20))"},
-        # scl15 daily sentiment
-        {"template_id": "vec_08", "expression": "rank(ts_backfill(scl15_d1_sentiment, 60) * -ts_mean(returns, {n}))"},
-        # v6.2.1: pasteurize-wrapped variants (prevents NaN propagation in sparse vec data)
-        {"template_id": "vec_09", "expression": "rank(pasteurize(ts_backfill(vec_sum(scl12_alltype_buzzvec), 20)))"},
-        {"template_id": "vec_10", "expression": "rank(pasteurize(ts_backfill(vec_avg(nws12_afterhsz_sl), 20)) * -ts_mean(returns, {n}))"},
         # v6.2.1: News-conditional regime switching — proven S=1.84
         {"template_id": "vec_11", "expression": "trade_when(rank(ts_sum(ts_backfill(vec_avg(nws12_afterhsz_sl), 20), 60)) > 0.5, rank(-ts_delta(close, 2)), -1)"},
     ],
 
-    # Model data fields — pre-computed proprietary signals most users overlook
-    # Proven: mdf_eg3 alpha achieved S=1.59, F=1.70
-    "model_data": [
-        # Net Piotroski Score — quality composite
-        {"template_id": "mdf_01", "expression": "rank(ts_backfill(mdf_nps, 60))"},
-        {"template_id": "mdf_02", "expression": "rank(ts_backfill(mdf_nps, 60) * -ts_mean(returns, {n}))"},
-        # Operating Earnings Yield — value signal
-        {"template_id": "mdf_03", "expression": "rank(ts_backfill(mdf_oey, 60))"},
-        {"template_id": "mdf_04", "expression": "group_rank(ts_backfill(mdf_oey, 60), industry)"},
-        # Earnings growth × sales growth correlation — proven S=1.59 pattern
-        {"template_id": "mdf_05", "expression": "rank(-ts_av_diff(ts_backfill(mdf_eg3, 60), 50) * ts_corr(ts_backfill(mdf_eg3, 60), ts_backfill(mdf_sg3, 60), 50))"},
-        # R&D intensity — innovation signal
-        {"template_id": "mdf_06", "expression": "rank(ts_backfill(mdf_rds, 60) * rank(adv20))"},
-        # Model Price-to-Book
-        {"template_id": "mdf_07", "expression": "rank(-ts_backfill(mdf_pbk, 60))"},
-        # mdl175 cross-category
-        {"template_id": "mdf_08", "expression": "rank(ts_backfill(mdl175_grossprofit, 60) / (ts_backfill(mdl175_revenuettm, 60) + 0.001))"},
+    # ══════════════════════════════════════════════════════════════════════
+    # v6.2.1: 10 NEW FAMILIES — completely untapped data categories
+    # ══════════════════════════════════════════════════════════════════════
+
+    # SUPPLY CHAIN — 165 pv13_* fields, 0 submitted alphas, fewest users on platform
+    "supply_chain": [
+        {"template_id": "sc_01", "expression": "rank(ts_mean(rel_ret_cust, {n}))"},
+        {"template_id": "sc_02", "expression": "rank(ts_mean(rel_ret_comp, {n})) * rank(-returns)"},
+        {"template_id": "sc_03", "expression": "rank(pv13_com_page_rank) * rank(ts_rank(operating_income / cap, 252))"},
+        {"template_id": "sc_04", "expression": "trade_when(ts_rank(ts_std_dev(returns, 22), 252) > 0.5, rank(ts_mean(rel_ret_cust, {n})), -1)"},
+        {"template_id": "sc_05", "expression": "rank(ts_mean(rel_ret_cust, {n}) - ts_mean(rel_ret_comp, {n}))"},
+        {"template_id": "sc_06", "expression": "rank(pv13_com_page_rank) * rank(forward_ebitda_to_enterprise_value_2)"},
+        {"template_id": "sc_07", "expression": "rank(ts_delta(rel_num_cust, {n}))"},
+        {"template_id": "sc_08", "expression": "rank(pv13_custretsig_retsig) * group_rank(ts_rank(est_eps / close, 60), industry)"},
     ],
 
-    # Event-driven — fundamental events and analyst estimate changes
-    # Uses days_from_last_change() and last_diff_value() for timing
-    "event_driven": [
-        # Forward EPS — proven S=2.03 on TOP1000
-        {"template_id": "evt_01", "expression": "rank(ts_rank(ts_backfill(fnd6_epsfx, 60) / close, 40))"},
-        {"template_id": "evt_02", "expression": "rank(ts_backfill(fnd6_epsfx, 60) / close)"},
-        # EPS revision freshness — recent changes matter more
-        {"template_id": "evt_03", "expression": "rank(last_diff_value(est_eps) / (days_from_last_change(est_eps) + 1))"},
-        # Earnings surprise percentage
-        {"template_id": "evt_04", "expression": "rank(ts_backfill(fam_earn_surp_pct, 60))"},
-        {"template_id": "evt_05", "expression": "rank(ts_backfill(fam_earn_surp_pct, 60) * -ts_mean(returns, {n}))"},
-        # ROE rank × reversion
-        {"template_id": "evt_06", "expression": "rank(ts_backfill(fam_roe_rank, 60) * -ts_mean(returns, {n}))"},
-        # Event timing + fundamental
-        {"template_id": "evt_07", "expression": "rank(last_diff_value(est_eps) * (est_eps / close))"},
+    # RAVENPACK CATEGORY SENTIMENT — 75 fields, 0 submitted alphas
+    "ravenpack_cat": [
+        {"template_id": "rp_01", "expression": "rank(ts_backfill(rp_ess_mna, 60))"},
+        {"template_id": "rp_02", "expression": "rank(ts_backfill(rp_ess_earnings, 60)) * rank(-ts_mean(returns, {n}))"},
+        {"template_id": "rp_03", "expression": "-rank(ts_av_diff(ts_backfill(rp_css_credit, 60), 30))"},
+        {"template_id": "rp_04", "expression": "rank(ts_backfill(rp_ess_insider, 60)) * rank(-(close - vwap) / vwap)"},
+        {"template_id": "rp_05", "expression": "rank(ts_backfill(rp_ess_revenue, 60)) * rank(snt1_d1_netearningsrevision)"},
+        {"template_id": "rp_06", "expression": "-rank(ts_backfill(rp_css_legal, 60))"},
+        {"template_id": "rp_07", "expression": "rank(ts_delta(ts_backfill(rp_ess_product, 60), 10))"},
+        {"template_id": "rp_08", "expression": "rank(ts_backfill(rp_nip_earnings, 60) * ts_backfill(rp_ess_earnings, 60))"},
+        {"template_id": "rp_09", "expression": "trade_when(ts_backfill(nws18_event_relevance, 60) > 50, rank(ts_backfill(rp_ess_earnings, 60)), -1)"},
+    ],
+
+    # OPTIONS ANALYTICS — breakeven & forward price, 74 fields, 0 submitted
+    "options_analytics": [
+        {"template_id": "oa_01", "expression": "rank(ts_backfill(call_breakeven_30, 60) / close - 1)"},
+        {"template_id": "oa_02", "expression": "rank(ts_backfill(call_breakeven_120, 60) - ts_backfill(call_breakeven_30, 60))"},
+        {"template_id": "oa_03", "expression": "rank(ts_delta(ts_backfill(forward_price_60, 60), 10) / close)"},
+        {"template_id": "oa_04", "expression": "rank(1 - ts_backfill(put_breakeven_30, 60) / close)"},
+        {"template_id": "oa_05", "expression": "rank((ts_backfill(call_breakeven_60, 60) - close) / (close - ts_backfill(put_breakeven_60, 60) + 0.001))"},
+        {"template_id": "oa_06", "expression": "rank(ts_delta(ts_backfill(option_breakeven_60, 60), {n})) * rank(volume / adv20)"},
+    ],
+
+    # HISTORICAL VOLATILITY — vol risk premium, 8 fields, 0 submitted
+    "hist_vol": [
+        {"template_id": "hv_01", "expression": "rank(ts_backfill(implied_volatility_call_60, 60) / (historical_volatility_60 + 0.001))"},
+        {"template_id": "hv_02", "expression": "trade_when(historical_volatility_20 > ts_mean(historical_volatility_20, 60), rank(-returns), -1)"},
+        {"template_id": "hv_03", "expression": "rank(historical_volatility_20 / (historical_volatility_90 + 0.001))"},
+        {"template_id": "hv_04", "expression": "rank(ts_delta(ts_backfill(implied_volatility_mean_skew_60, 60), 10))"},
+        {"template_id": "hv_05", "expression": "-rank(ts_backfill(implied_volatility_mean_60, 60))"},
+    ],
+
+    # FUNDAMENTAL SCORES (fscore_*) — 24 fields, 0 submitted
+    "fscore": [
+        {"template_id": "fs_01", "expression": "rank(ts_backfill(fscore_bfl_quality, 60)) * rank(ts_backfill(fscore_bfl_momentum, 60))"},
+        {"template_id": "fs_02", "expression": "rank(ts_backfill(fscore_bfl_surface_accel, 60)) * rank(cap)"},
+        {"template_id": "fs_03", "expression": "rank(ts_backfill(fscore_bfl_total, 60) * rank(cap))"},
+        {"template_id": "fs_04", "expression": "rank(ts_backfill(fscore_bfl_value, 60)) * rank(ts_backfill(fscore_bfl_profitability, 60))"},
+        {"template_id": "fs_05", "expression": "rank(ts_backfill(growth_potential_rank_derivative, 60))"},
+        {"template_id": "fs_06", "expression": "rank(ts_delta(ts_backfill(composite_factor_score_derivative, 60), 20))"},
+    ],
+
+    # RISK METRICS — beta, correlation, systematic risk, 16 fields, 0 submitted
+    "risk_metrics": [
+        {"template_id": "rm_01", "expression": "-rank(beta_last_60_days_spy)"},
+        {"template_id": "rm_02", "expression": "rank(unsystematic_risk_last_60_days / (systematic_risk_last_60_days + 0.001))"},
+        {"template_id": "rm_03", "expression": "rank(beta_last_30_days_spy - beta_last_90_days_spy)"},
+        {"template_id": "rm_04", "expression": "-rank(ts_delta(correlation_last_60_days_spy, 20))"},
+        {"template_id": "rm_05", "expression": "-rank(beta_last_60_days_spy) * rank(forward_ebitda_to_enterprise_value_2)"},
+        {"template_id": "rm_06", "expression": "trade_when(systematic_risk_last_30_days > systematic_risk_last_90_days, rank(-returns), -1)"},
+    ],
+
+    # INTRADAY PATTERNS — open/high/low/close relationships, 0 submitted
+    "intraday_pattern": [
+        {"template_id": "id_01", "expression": "rank(-(open - ts_delay(close, 1)) / (ts_delay(close, 1) + 0.001))"},
+        {"template_id": "id_02", "expression": "rank((close - open) / (high - low + 0.001))"},
+        {"template_id": "id_03", "expression": "-rank((high - max(open, close)) / (high - low + 0.001))"},
+        {"template_id": "id_04", "expression": "rank(-ts_mean(high - low, {n}) / (ts_mean(high - low, 60) + 0.001))"},
+        {"template_id": "id_05", "expression": "rank(ts_mean((high - low) / (volume + 0.001), {n}))"},
+    ],
+
+    # DEEP ANALYST SENTIMENT — snt1_d1_* deep fields, mostly untapped
+    "analyst_deep": [
+        {"template_id": "as_01", "expression": "-rank(snt1_d1_earningstorpedo)"},
+        {"template_id": "as_02", "expression": "rank(snt1_d1_buyrecpercent - snt1_d1_sellrecpercent)"},
+        {"template_id": "as_03", "expression": "rank(snt1_d1_uptargetpercent - snt1_d1_downtargetpercent)"},
+        {"template_id": "as_04", "expression": "rank(snt1_d1_analystcoverage) * rank(snt1_d1_earningsrevision)"},
+        {"template_id": "as_05", "expression": "rank(snt1_d1_longtermepsgrowthest) * rank(-returns)"},
+        {"template_id": "as_06", "expression": "rank(snt1_d1_stockrank)"},
+        {"template_id": "as_07", "expression": "rank(snt1_d1_fundamentalfocusrank - snt1_d1_dynamicfocusrank)"},
+    ],
+
+    # SOCIAL MEDIA SCALAR — non-vector buzz/sentiment, 0 submitted
+    "social_scalar": [
+        {"template_id": "sm_01", "expression": "-rank(scl12_buzz)"},
+        {"template_id": "sm_02", "expression": "rank(scl12_buzz_fast_d1)"},
+        {"template_id": "sm_03", "expression": "rank(snt_value)"},
+        {"template_id": "sm_04", "expression": "rank(scl12_buzz * scl12_sentiment)"},
+        {"template_id": "sm_05", "expression": "rank(snt_buzz_ret)"},
+    ],
+
+    # WILD COMBOS — cross-category novel interactions
+    "wild_combos": [
+        {"template_id": "wild_01", "expression": "rank(ts_mean(rel_ret_cust, 5)) * rank(ts_backfill(implied_volatility_call_60, 60) / (historical_volatility_60 + 0.001))"},
+        {"template_id": "wild_02", "expression": "group_zscore(ts_backfill(rp_css_credit, 60), industry) * rank(ts_rank(cashflow_op / cap, 252))"},
+        {"template_id": "wild_03", "expression": "trade_when(historical_volatility_20 > ts_mean(historical_volatility_20, 60), rank(-returns) * rank(volume / adv20), -1)"},
+        {"template_id": "wild_04", "expression": "rank(ts_backfill(forward_price_60, 60) / close - 1) * rank(gross_profit_to_assets_ratio)"},
+        {"template_id": "wild_05", "expression": "rank(-snt1_d1_earningstorpedo) * rank(ts_mean(rel_ret_comp, 5))"},
+        {"template_id": "wild_06", "expression": "rank(ts_backfill(fscore_bfl_surface_accel, 60)) * rank(ts_backfill(implied_volatility_mean_skew_60, 60))"},
+        {"template_id": "wild_07", "expression": "rank(correlation_last_30_days_spy - correlation_last_360_days_spy) * rank(ts_rank(operating_income / cap, 252))"},
     ],
 }
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import re
 
 import config
 from evaluator import evaluate_submission, parse_metrics
@@ -58,6 +59,12 @@ class AlphaBot:
         self._score_negative_cores: set[str] = set()
         # v6.2: Track consecutive diversity skips per base to fast-exhaust
         self._diversity_skip_count: dict[str, int] = {}
+        # v6.2.1: DNS circuit breaker — track consecutive poll errors per sim
+        self._poll_error_count: dict[str, int] = {}
+        # v6.2.1: Stall detection — track time since last eligible alpha
+        self._last_eligible_time = None
+        self._stall_level = 0  # escalation level 0-4
+        self._sims_since_last_eligible = 0
         # v6.0: Track refinement attempts per CORE SIGNAL to prevent same expression via different candidates
         self.refinement_attempts_by_core: dict[str, int] = {}
         # v6.0: Track recently simulated LLM expressions to prevent duplicates
@@ -164,7 +171,63 @@ class AlphaBot:
     def tick(self) -> None:
         self.client.ensure_session()
         self._poll_running()
+        self._check_stall()   # v6.2.1: stall detection
         self._fill_capacity()
+
+    # =========================================================
+    # v6.2.1: Stall detection + escalating recovery
+    # =========================================================
+
+    def _check_stall(self) -> None:
+        """
+        Detect when the bot is stalled (no eligible alphas for too long)
+        and apply escalating recovery actions.
+        
+        Level 0: Normal operation
+        Level 1: After 100 sims with no eligible → boost LLM temperature, log warning
+        Level 2: After 200 sims → force template rotation to least-explored families
+        Level 3: After 400 sims → reset to exploration-heavy mode
+        """
+        if self._sims_since_last_eligible < 100:
+            return
+
+        new_level = 0
+        if self._sims_since_last_eligible >= 400:
+            new_level = 3
+        elif self._sims_since_last_eligible >= 200:
+            new_level = 2
+        elif self._sims_since_last_eligible >= 100:
+            new_level = 1
+
+        if new_level > self._stall_level:
+            self._stall_level = new_level
+            print(f"[STALL_DETECTED] level={new_level} sims_since_eligible={self._sims_since_last_eligible}")
+
+            if new_level == 1:
+                # Boost LLM generation probability
+                if self.llm_generator and self.llm_generator.available:
+                    print("[STALL_RECOVERY_L1] Boosting LLM temperature for exploration")
+
+            elif new_level == 2:
+                # Force refresh of combiners and evolver to find new material
+                if self.signal_combiner:
+                    try:
+                        self.signal_combiner.refresh_near_passers()
+                        print("[STALL_RECOVERY_L2] Refreshed signal combiner near-passers")
+                    except Exception:
+                        pass
+                if self.evolver:
+                    try:
+                        self.evolver.refresh_population()
+                        print("[STALL_RECOVERY_L2] Refreshed evolver population")
+                    except Exception:
+                        pass
+
+            elif new_level == 3:
+                # Nuclear option — reset stall counter to avoid infinite escalation
+                print("[STALL_RECOVERY_L3] Full exploration reset — clearing template exhaustion")
+                self.family_template_exhausted.clear()
+                self.core_signal_exhausted.clear()
 
     # =========================================================
     # Polling
@@ -174,11 +237,34 @@ class AlphaBot:
         for sim_id, run_id in list(self.scheduler.active_items()):
             try:
                 result = self.client.poll_simulation(sim_id)
+                # v6.2.1: Reset error counter on successful poll
+                self._poll_error_count.pop(sim_id, None)
             except BrainAPIError as exc:
-                print(f"[POLL_ERROR] sim_id={sim_id} run_id={run_id} error={exc}")
+                # v6.2.1: DNS circuit breaker — mark timed_out after 20 consecutive failures
+                self._poll_error_count[sim_id] = self._poll_error_count.get(sim_id, 0) + 1
+                if self._poll_error_count[sim_id] >= 20:
+                    self.scheduler.remove(sim_id)
+                    self.storage.update_run(
+                        run_id, status="timed_out", completed_at=utc_now(),
+                        error_message=f"DNS circuit breaker: {self._poll_error_count[sim_id]} consecutive poll failures",
+                    )
+                    print(f"[DNS_CIRCUIT_BREAK] run_id={run_id} sim_id={sim_id} after {self._poll_error_count[sim_id]} failures")
+                    self._poll_error_count.pop(sim_id, None)
+                else:
+                    print(f"[POLL_ERROR] sim_id={sim_id} run_id={run_id} error={exc}")
                 continue
             except Exception as exc:
-                print(f"[POLL_UNEXPECTED] sim_id={sim_id} run_id={run_id} error={exc}")
+                self._poll_error_count[sim_id] = self._poll_error_count.get(sim_id, 0) + 1
+                if self._poll_error_count[sim_id] >= 20:
+                    self.scheduler.remove(sim_id)
+                    self.storage.update_run(
+                        run_id, status="timed_out", completed_at=utc_now(),
+                        error_message=f"DNS circuit breaker: {self._poll_error_count[sim_id]} consecutive errors",
+                    )
+                    print(f"[DNS_CIRCUIT_BREAK] run_id={run_id} sim_id={sim_id} after {self._poll_error_count[sim_id]} failures")
+                    self._poll_error_count.pop(sim_id, None)
+                else:
+                    print(f"[POLL_UNEXPECTED] sim_id={sim_id} run_id={run_id} error={exc}")
                 continue
 
             status = result.get("status", "running")
@@ -308,6 +394,14 @@ class AlphaBot:
             print(f"[REFINEMENT_QUEUE_ERROR] {exc}")
 
         self.completed_runs += 1
+        # v6.2.1: Stall detection tracking
+        self._sims_since_last_eligible += 1
+        if decision.should_submit:
+            self._last_eligible_time = utc_now()
+            self._sims_since_last_eligible = 0
+            if self._stall_level > 0:
+                print(f"[STALL_RECOVERED] level was {self._stall_level}, resetting")
+                self._stall_level = 0
 
         sharpe_str = "None" if metrics.sharpe is None else f"{metrics.sharpe:.3f}"
         fitness_str = "None" if metrics.fitness is None else f"{metrics.fitness:.3f}"
@@ -1995,6 +2089,21 @@ class AlphaBot:
                         f"[CORE_OVERLAP] template={candidate.template_id} family={candidate.family} "
                         f"core='{core[:60]}' — 1 already submitted, allowing variant"
                     )
+
+            # v6.2.1: Pre-sim operator count — must match WQ's counting method
+            # WQ counts: function calls + arithmetic (+,-,*,/) + comparisons (>,<,>=,<=,!=,==)
+            _expr = candidate.expression
+            op_count = (
+                len(re.findall(r'\b[a-z_]+\s*\(', _expr))  # function calls
+                + len(re.findall(r'(?<![!=<>])[+\-*/](?![!=])', _expr))  # arithmetic ops
+                + len(re.findall(r'[<>]=?|[!=]=', _expr))  # comparison ops
+            )
+            if op_count > 60:  # WQ limit is 64, leave small margin
+                print(
+                    f"[OP_LIMIT_BLOCK] ops={op_count} template={candidate.template_id} "
+                    f"family={candidate.family} expr={candidate.expression[:80]}"
+                )
+                continue
 
             try:
                 self.storage.insert_candidate(candidate)

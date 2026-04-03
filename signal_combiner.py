@@ -193,9 +193,10 @@ class SignalCombiner:
         else:
             expr = self._build_three_signal_combo(components, mode)
 
-        # v6.2: Check operator count BEFORE returning — WQ limit is 64
+        # v6.2.1: Tighter operator count — combos get wrapped further by generator
+        # WQ limit is 64, but generator adds rank/ts_decay_linear wrappers (+4-6 ops)
         op_count = self._count_operators(expr)
-        if op_count > 60:
+        if op_count > 58:
             cats_str = "+".join(c["category"] for c in components)
             print(f"[COMBO_OP_LIMIT] {op_count} operators in {cats_str} combo (limit 60), skipping")
             return None
@@ -211,9 +212,13 @@ class SignalCombiner:
 
     @staticmethod
     def _count_operators(expr: str) -> int:
-        """Count function-call operators in an expression (word followed by open paren)."""
+        """Count ALL operators in an expression — must match WQ's method.
+        WQ counts: function calls + arithmetic (+,-,*,/) + comparisons (>,<,>=,<=,!=,==)."""
         import re
-        return len(re.findall(r'[a-z_]+\s*\(', expr))
+        func_ops = len(re.findall(r'[a-z_]+\s*\(', expr))
+        arith_ops = len(re.findall(r'(?<![!=<>])[+\-*/](?![!=])', expr))
+        compare_ops = len(re.findall(r'[<>]=?|[!=]=', expr))
+        return func_ops + arith_ops + compare_ops
 
     def _build_two_signal_combo(
         self, sig_a: dict, sig_b: dict, mode: str,
