@@ -55,7 +55,7 @@ MAX_TURNOVER = 0.70
 NEAR_PASSER_MIN_SHARPE = 1.35
 NEAR_PASSER_MIN_FITNESS = 0.75
 NEAR_PASSER_MAX_TURNOVER = 0.75
-REFINEMENT_PROBABILITY = 0.40  # v6.0: was 0.65 — logs show 50% of sims wasted on refinement
+REFINEMENT_PROBABILITY = 0.60  # v6.2.1: was 0.40 — queue growing faster than processing (178 unconsumed)
 
 MIN_REFINEMENT_SHARPE = 1.20
 FRONTIER_MIN_SHARPE = 1.25
@@ -77,7 +77,7 @@ DIVERSITY_EXPLORATION_PROBABILITY = 0.12
 MAX_REFINEMENT_ATTEMPTS_PER_BASE = 5   # v6.0: was 10 — logs show 10+ attempts never crack fitness
 MAX_CORE_SIGNAL_EXHAUSTIONS = 2  # v6.0: was 3 — same core through different candidates wastes sims
 MAX_FAMILY_TEMPLATE_EXHAUSTIONS = 2  # v6.0: was 3 — m7c_03 exhausted 12 times in overnight run
-MAX_REFINEMENT_PER_CORE = 5  # v6.2: was 15 — logs show 15 attempts never crack; save ~30-40 sims per run
+MAX_REFINEMENT_PER_CORE = 5  # v6.2.1: was 5 — faster exhaustion, queue was growing unbounded
 MAX_SUBMISSIONS_PER_CORE = 3  # v6.0.1: allow up to 3 variants of same core before blocking (WQ accepts different post-processing)
 LOCAL_REFINEMENT_HISTORY = 10
 LOCAL_REFINEMENT_MAX_SIMILARITY = 0.90

@@ -771,8 +771,10 @@ class AlphaBot:
             tried_combos = set()
             generated = 0
 
+            # v6.2.1: Collect all variant settings first, then simulate in parallel batches of 3
+            pending_variants = []
             for i in range(n_variants * 3):
-                if generated >= n_variants:
+                if len(pending_variants) >= n_variants:
                     break
 
                 suggestion = self.settings_optimizer.suggest(
@@ -808,63 +810,92 @@ class AlphaBot:
                     f"d{suggestion.get('decay','?')}/"
                     f"t{suggestion.get('truncation','?')}"
                 )
+                pending_variants.append((desc, variant_settings))
 
-                print(f"  [Variant {generated+1}] {desc} — simulating...")
+            # Submit in parallel batches of 3 (WQ concurrent sim limit)
+            import time as _time
+            batch_size = 3
+            for batch_start in range(0, len(pending_variants), batch_size):
+                batch = pending_variants[batch_start:batch_start + batch_size]
+                
+                # Submit all in batch
+                batch_sims = []
+                for desc, vsettings in batch:
+                    try:
+                        sim_id_v = self.client.submit_simulation(expression, vsettings)
+                        batch_sims.append((desc, vsettings, sim_id_v))
+                        print(f"  [Variant] {desc} — submitted")
+                    except Exception as exc:
+                        print(f"  [Variant] {desc} — submit failed: {exc}")
 
-                try:
-                    sim_id = self.client.submit_simulation(expression, variant_settings)
-                    variant_result = self.client.wait_for_completion(
-                        sim_id, poll_interval_seconds=8, timeout_minutes=5,
-                    )
-                except Exception as exc:
-                    print(f"    ⚠️ Sim failed: {exc}")
-                    continue
+                # Poll all in batch until done
+                batch_results = {}
+                deadline = _time.time() + 5 * 60  # 5 min timeout
+                while len(batch_results) < len(batch_sims) and _time.time() < deadline:
+                    for desc, vsettings, sid in batch_sims:
+                        if sid in batch_results:
+                            continue
+                        try:
+                            result_v = self.client.poll_simulation(sid)
+                            if result_v["status"] in ("completed", "failed", "timed_out"):
+                                batch_results[sid] = (desc, vsettings, result_v)
+                        except Exception:
+                            pass
+                    if len(batch_results) < len(batch_sims):
+                        _time.sleep(8)
 
-                if variant_result["status"] != "completed":
-                    print(f"    ⚠️ Sim status: {variant_result['status']}")
-                    continue
+                # Process batch results
+                for desc, vsettings, sid in batch_sims:
+                    if sid not in batch_results:
+                        print(f"    ⚠️ {desc} — timed out")
+                        continue
+                    _, _, variant_result = batch_results[sid]
 
-                v_metrics = parse_metrics(f"opt_{generated}", variant_result)
-                if not v_metrics.submit_eligible:
+                    if variant_result["status"] != "completed":
+                        print(f"    ⚠️ {desc} — status: {variant_result['status']}")
+                        continue
+
+                    v_metrics = parse_metrics(f"opt_{generated}", variant_result)
+                    if not v_metrics.submit_eligible:
+                        print(
+                            f"    ⚠️ Not eligible: S={v_metrics.sharpe:.2f} F={v_metrics.fitness:.2f} "
+                            f"({v_metrics.fail_reason})"
+                        )
+                        continue
+
+                    v_alpha_id = self._extract_alpha_id(variant_result)
+                    if not v_alpha_id:
+                        print(f"    ⚠️ No alpha_id in result")
+                        continue
+
                     print(
-                        f"    ⚠️ Not eligible: S={v_metrics.sharpe:.2f} F={v_metrics.fitness:.2f} "
-                        f"({v_metrics.fail_reason})"
+                        f"    ✅ Eligible: S={v_metrics.sharpe:.2f} F={v_metrics.fitness:.2f} "
+                        f"T={v_metrics.turnover:.3f}"
                     )
-                    continue
 
-                v_alpha_id = self._extract_alpha_id(variant_result)
-                if not v_alpha_id:
-                    print(f"    ⚠️ No alpha_id in result")
-                    continue
+                    # Check self-correlation for variant
+                    try:
+                        v_check = self.client.check_alpha(v_alpha_id)
+                    except Exception as exc:
+                        print(f"    ⚠️ Self-corr check timed out: {exc}")
+                        continue
+                    if v_check["_passed"] is not True:
+                        print(f"    ❌ Self-corr failed (corr={v_check['_self_correlation']})")
+                        continue
 
-                print(
-                    f"    ✅ Eligible: S={v_metrics.sharpe:.2f} F={v_metrics.fitness:.2f} "
-                    f"T={v_metrics.turnover:.3f}"
-                )
+                    print(f"    ✅ Self-corr passed (corr={v_check['_self_correlation']})")
 
-                # Check self-correlation for variant
-                try:
-                    v_check = self.client.check_alpha(v_alpha_id)
-                except Exception as exc:
-                    print(f"    ⚠️ Self-corr check timed out: {exc}")
-                    continue
-                if v_check["_passed"] is not True:
-                    print(f"    ❌ Self-corr failed (corr={v_check['_self_correlation']})")
-                    continue
-
-                print(f"    ✅ Self-corr passed (corr={v_check['_self_correlation']})")
-
-                variants.append({
-                    "alpha_id": v_alpha_id,
-                    "change": None,
-                    "sharpe": v_metrics.sharpe,
-                    "fitness": v_metrics.fitness,
-                    "desc": desc,
-                    "candidate_id": candidate_id,
-                    "run_id": run_id,
-                    "settings_json": _json.dumps(variant_settings),
-                })
-                generated += 1
+                    variants.append({
+                        "alpha_id": v_alpha_id,
+                        "change": None,
+                        "sharpe": v_metrics.sharpe,
+                        "fitness": v_metrics.fitness,
+                        "desc": desc,
+                        "candidate_id": candidate_id,
+                        "run_id": run_id,
+                        "settings_json": _json.dumps(vsettings),
+                    })
+                    generated += 1
 
         # ── Step 3: Check before-after for ALL viable variants ──
         print(f"\n  Checking merged performance for {len(variants)} viable variant(s)...")

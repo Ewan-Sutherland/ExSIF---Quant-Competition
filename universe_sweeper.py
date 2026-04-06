@@ -168,13 +168,6 @@ class UniverseSweeper:
         job = self._queue.pop(0)
         self._sweep_count += 1
 
-        s = job.settings
-        print(
-            f"[SWEEP_SIM] universe={s['universe']} neut={s['neutralization']} "
-            f"decay={s['decay']} family={job.family} "
-            f"expr={job.expression[:60]}..."
-        )
-
         return {
             "expression": job.expression,
             "settings": job.settings,
