@@ -96,6 +96,16 @@ class SignalCombiner:
             expr = row.get("canonical_expression", "")
             if not expr:
                 continue
+
+            # v7.1: Filter out expressions using fields not in this bot's dataset
+            # Prevents combiner from building combos with teammates' fields
+            try:
+                from datasets import expression_uses_valid_fields
+                if not expression_uses_valid_fields(expr):
+                    continue
+            except Exception:
+                pass
+
             category = classify_expression(expr)
             if category == "unknown":
                 continue

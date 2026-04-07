@@ -561,9 +561,62 @@ TEMPLATE_LIBRARY: dict[str, list[dict[str, str]]] = {
         {"template_id": "fv_11", "expression": "rank(ts_rank(operating_income / cap, 252) * (1 / (parkinson_volatility_180 + 0.001)))"},
         {"template_id": "fv_12", "expression": "rank(ts_rank(operating_income / cap, 252)) * rank(1 / (parkinson_volatility_180 + 0.001))"},
     ],
-}
+    # ── v7.1: NEW SIGNAL DIMENSIONS — break the self-correlation wall ──────
+    # These target fields that NO existing template touches, maximising chance
+    # of producing alphas uncorrelated with the existing 46 submissions.
 
-# ── Field lists ───────────────────────────────────────────────────────
+    # nws18_* event fields — 14 completely untouched fields
+    "news_event_signal": [
+        {"template_id": "ne_01", "expression": "rank(ts_backfill({news_event_field}, 60))"},
+        {"template_id": "ne_02", "expression": "-rank(ts_backfill({news_event_field}, 60))"},
+        {"template_id": "ne_03", "expression": "rank(ts_zscore(ts_backfill({news_event_field}, 60), {n}))"},
+        {"template_id": "ne_04", "expression": "rank(ts_delta(ts_backfill({news_event_field}, 60), {n}))"},
+        {"template_id": "ne_05", "expression": "ts_decay_linear(rank(ts_backfill({news_event_field}, 60)), {n})"},
+        {"template_id": "ne_06", "expression": "group_rank(ts_backfill({news_event_field}, 60), industry)"},
+        {"template_id": "ne_07", "expression": "rank(ts_backfill({news_event_field}, 60)) * rank(-returns)"},
+        {"template_id": "ne_08", "expression": "rank(ts_backfill({news_event_field}, 60)) * rank(adv20)"},
+        {"template_id": "ne_09", "expression": "rank(ts_backfill({news_event_field}, 60) * -ts_zscore(returns, {n}))"},
+        {"template_id": "ne_10", "expression": "trade_when(ts_backfill({news_event_field}, 60) > 0, rank(-returns), -1)"},
+    ],
+
+    # Underused RavenPack categories — ~50 fields the LLM never generates
+    "rp_category_fresh": [
+        {"template_id": "rpf_01", "expression": "rank(ts_backfill({rp_field}, 60))"},
+        {"template_id": "rpf_02", "expression": "rank(ts_backfill({rp_field}, 60)) * rank(-returns)"},
+        {"template_id": "rpf_03", "expression": "rank(ts_backfill({rp_field}, 60) * -ts_zscore(returns, {n}))"},
+        {"template_id": "rpf_04", "expression": "ts_decay_linear(rank(ts_backfill({rp_field}, 60)), {n})"},
+        {"template_id": "rpf_05", "expression": "rank(ts_delta(ts_backfill({rp_field}, 60), {n}))"},
+        {"template_id": "rpf_06", "expression": "group_rank(ts_backfill({rp_field}, 60), industry)"},
+        {"template_id": "rpf_07", "expression": "rank(ts_backfill({rp_field}, 60)) * rank(adv20)"},
+        {"template_id": "rpf_08", "expression": "rank(ts_backfill({rp_field}, 60)) * rank(cap)"},
+        {"template_id": "rpf_09", "expression": "rank(ts_backfill({rp_field}, 60) * -ts_mean((close - vwap) / vwap, {n}))"},
+        {"template_id": "rpf_10", "expression": "rank(ts_zscore(ts_backfill({rp_field}, 60), {n})) + rank(-ts_mean(returns, {m}))"},
+    ],
+
+    # Derivative scores × price/vol — rate-of-change of fundamentals
+    "derivative_interaction": [
+        {"template_id": "di_01", "expression": "rank({derivative_field}) * rank(-returns)"},
+        {"template_id": "di_02", "expression": "rank({derivative_field}) * rank(-ts_zscore(returns, {n}))"},
+        {"template_id": "di_03", "expression": "rank({derivative_field}) + rank(-(close - vwap) / (vwap + 0.001))"},
+        {"template_id": "di_04", "expression": "group_rank({derivative_field}, subindustry) * rank(-ts_mean(returns, {n}))"},
+        {"template_id": "di_05", "expression": "rank(ts_zscore({derivative_field}, {n})) * rank(adv20)"},
+        {"template_id": "di_06", "expression": "rank({derivative_field}) * rank(ts_backfill(implied_volatility_call_120, 60) / (historical_volatility_120 + 0.001))"},
+        {"template_id": "di_07", "expression": "rank({derivative_field}) * rank(1 / (parkinson_volatility_180 + 0.001))"},
+        {"template_id": "di_08", "expression": "ts_decay_linear(rank({derivative_field} * -ts_mean((close - vwap) / vwap, {n})), {m})"},
+    ],
+
+    # Cross-dimension: model77 × event/options — structural combinations too complex for combiner
+    "cross_dimension": [
+        {"template_id": "xd_01", "expression": "rank({model77_field}) * rank(ts_backfill({rp_field}, 60))"},
+        {"template_id": "xd_02", "expression": "rank({model77_field}) * rank(ts_backfill({news_event_field}, 60))"},
+        {"template_id": "xd_03", "expression": "rank({model77_field}) * rank({derivative_field})"},
+        {"template_id": "xd_04", "expression": "rank(ts_backfill({rp_field}, 60)) * rank({derivative_field})"},
+        {"template_id": "xd_05", "expression": "rank(ts_backfill({rp_field}, 60)) * rank(ts_backfill(implied_volatility_call_120, 60) - ts_backfill(implied_volatility_put_120, 60))"},
+        {"template_id": "xd_06", "expression": "rank(ts_backfill({news_event_field}, 60)) * rank({derivative_field}) * rank(adv20)"},
+        {"template_id": "xd_07", "expression": "group_rank({model77_field}, industry) * rank(ts_backfill({rp_field}, 60))"},
+        {"template_id": "xd_08", "expression": "rank({model77_field} * ts_backfill({rp_field}, 60)) + rank(-ts_mean(returns, {m}))"},
+    ],
+}
 
 # ── v7.0: Dynamic field loading from datasets.py ──────────────────
 # Fields are loaded from the team datasets Excel at startup.
@@ -572,6 +625,7 @@ from datasets import (
     get_fundamental_fields, get_deep_fundamental_fields, get_analyst_fields,
     get_sentiment_fields, get_fscore_fields, get_derivative_fields,
     get_options_windows, get_pcr_windows, get_model77_fields,
+    get_news_event_fields, get_rp_underused_fields,
 )
 
 FUNDAMENTAL_FIELDS = get_fundamental_fields()
@@ -582,6 +636,25 @@ FSCORE_FIELDS = get_fscore_fields()
 DERIVATIVE_FIELDS = get_derivative_fields()
 OPTIONS_WINDOWS = get_options_windows()
 PCR_WINDOWS = get_pcr_windows()
+
+# v7.1: Untouched field pools for new signal dimensions
+NEWS_EVENT_FIELDS = get_news_event_fields() or [
+    "nws18_acb", "nws18_bam", "nws18_bee", "nws18_ber",
+    "nws18_event_relevance", "nws18_event_similarity_days",
+    "nws18_ghc_lna", "nws18_nip", "nws18_qcm", "nws18_qep",
+    "nws18_qmb", "nws18_relevance", "nws18_ssc", "nws18_sse",
+]
+RP_UNDERUSED_FIELDS = get_rp_underused_fields() or [
+    "rp_css_assets", "rp_css_business", "rp_css_dividends", "rp_css_equity",
+    "rp_css_insider", "rp_css_labor", "rp_css_mna", "rp_css_product",
+    "rp_css_revenue", "rp_css_technical",
+    "rp_ess_assets", "rp_ess_business", "rp_ess_credit", "rp_ess_dividends",
+    "rp_ess_equity", "rp_ess_insider", "rp_ess_labor", "rp_ess_product",
+    "rp_ess_revenue", "rp_ess_technical",
+    "rp_nip_assets", "rp_nip_business", "rp_nip_credit", "rp_nip_dividends",
+    "rp_nip_equity", "rp_nip_insider", "rp_nip_labor", "rp_nip_product",
+    "rp_nip_revenue", "rp_nip_technical",
+]
 
 # Model77 fields — curated tiers for template sampling
 # The full 3,241 field pool is available to the LLM, but template {model77_field}
@@ -709,4 +782,9 @@ DATASET_NEUTRALIZATION = {
     "wild_combos": ["MARKET", "INDUSTRY", "SUBINDUSTRY"],
     "tutorial_proven": ["MARKET", "INDUSTRY", "SECTOR"],
     "high_sharpe": ["SUBINDUSTRY", "INDUSTRY", "MARKET"],
+    # v7.1: New signal dimension families
+    "news_event_signal": ["SUBINDUSTRY", "MARKET", "INDUSTRY"],
+    "rp_category_fresh": ["SUBINDUSTRY", "MARKET", "INDUSTRY"],
+    "derivative_interaction": ["INDUSTRY", "SUBINDUSTRY", "MARKET"],
+    "cross_dimension": ["INDUSTRY", "SUBINDUSTRY", "MARKET"],
 }

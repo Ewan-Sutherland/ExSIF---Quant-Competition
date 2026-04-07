@@ -105,6 +105,15 @@ class AlphaEvolver:
             expr = row.get("canonical_expression", "")
             if not expr:
                 continue
+
+            # v7.1: Filter out expressions using fields not in this bot's dataset
+            try:
+                from datasets import expression_uses_valid_fields
+                if not expression_uses_valid_fields(expr):
+                    continue
+            except Exception:
+                pass
+
             category = classify_expression(expr)
             entry = {
                 "expression": expr,

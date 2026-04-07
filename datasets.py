@@ -198,6 +198,39 @@ def get_all_valid_fields() -> set[str]:
     return all_fields
 
 
+def expression_uses_valid_fields(expr: str) -> bool:
+    """Check if an expression only uses fields available in this bot's dataset.
+
+    v7.1: Used by combiner and evolver to filter out near-passers from
+    teammates' datasets that use fields this bot doesn't have.
+    Returns True if all fields are valid (or check fails), False if invalid fields found.
+    """
+    import re
+    try:
+        valid = get_all_valid_fields()
+        tokens = set(re.findall(r'[a-z][a-z0-9_]+', expr.lower()))
+        operators = {
+            'rank', 'group_rank', 'ts_mean', 'ts_std_dev', 'ts_zscore', 'ts_rank',
+            'ts_delta', 'ts_decay_linear', 'ts_corr', 'ts_sum', 'ts_backfill',
+            'ts_regression', 'ts_step', 'ts_delay', 'ts_scale', 'ts_arg_min',
+            'ts_arg_max', 'ts_covariance', 'ts_product', 'ts_count_nans',
+            'ts_quantile', 'ts_av_diff', 'trade_when', 'if_else',
+            'abs', 'log', 'sign', 'max', 'min', 'power', 'sqrt',
+            'is_nan', 'bucket', 'densify', 'winsorize', 'normalize',
+            'group_neutralize', 'group_zscore', 'group_scale', 'group_backfill',
+            'group_mean', 'scale', 'quantile', 'zscore',
+            'vec_avg', 'vec_sum', 'signed_power', 'inverse', 'reverse', 'hump',
+            'kth_element', 'range', 'true', 'false', 'rettype',
+            'industry', 'subindustry', 'sector', 'market', 'exchange',
+        }
+        field_tokens = tokens - operators
+        valid_lower = {f.lower() for f in valid}
+        missing = [t for t in field_tokens if t not in valid_lower and len(t) > 3]
+        return len(missing) == 0
+    except Exception:
+        return True  # If check fails, allow it
+
+
 # ── Convenience accessors for specific field categories ────────────
 # These replace the hardcoded lists in templates.py
 
@@ -333,6 +366,21 @@ def get_news_fields() -> list[str]:
     """All news/ravenpack fields."""
     names = get_all_field_names()
     return names.get("news_data", []) + names.get("news_events", [])
+
+
+def get_news_event_fields() -> list[str]:
+    """Pure nws18_* event fields (not rp_* ravenpack)."""
+    names = get_all_field_names()
+    return [f for f in names.get("news_events", []) if f.startswith("nws18_")]
+
+
+def get_rp_underused_fields() -> list[str]:
+    """RavenPack category fields that templates rarely touch."""
+    names = get_all_field_names()
+    all_rp = [f for f in names.get("news_events", []) if f.startswith("rp_")]
+    # Exclude the handful the LLM already overuses
+    common = {"rp_ess_earnings", "rp_ess_mna", "rp_nip_earnings", "rp_css_credit", "rp_css_legal"}
+    return [f for f in all_rp if f not in common]
 
 
 def get_supply_chain_fields() -> list[str]:

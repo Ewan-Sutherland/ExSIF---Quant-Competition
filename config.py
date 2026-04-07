@@ -242,6 +242,11 @@ FAMILY_BASE_WEIGHTS = {
     "fn_financial": 5.00,
     "simple_ratio": 5.00,       # liabilities/assets gave +175!
     "fundamental_vol": 3.00,    # operating_income/parkinson_vol showed +152 score change
+    # v7.1: NEW SIGNAL DIMENSIONS — untouched fields, maximum decorrelation potential
+    "news_event_signal": 5.00,  # 14 nws18_* fields completely untouched by any template
+    "rp_category_fresh": 5.00,  # ~50 rp_css/rp_ess/rp_nip fields LLM never generates
+    "derivative_interaction": 4.00,  # derivative_scores × price/vol cross-signals
+    "cross_dimension": 4.00,    # model77 × events/options structural combos
 }
 
 TEMPLATE_BASE_WEIGHTS = {

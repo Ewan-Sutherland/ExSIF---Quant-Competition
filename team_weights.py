@@ -272,9 +272,11 @@ class TeamWeights:
         except Exception:
             pass
 
-        # v7.1: If RPC failed (timeout), use hardcoded fallback so LLM doesn't waste calls
-        if not rpc_succeeded and not dead:
+        # v7.1: If RPC failed (timeout), always merge hardcoded fallback
+        # Previously checked `not dead` but get_blocked_families() populates dead,
+        # so fallback never fired even when the RPC timed out
+        if not rpc_succeeded:
             dead.update(DEAD_FAMILIES_FALLBACK)
-            logger.info(f"[TEAM] Using dead families fallback ({len(DEAD_FAMILIES_FALLBACK)} families)")
+            logger.info(f"[TEAM] RPC failed — using dead families fallback ({len(DEAD_FAMILIES_FALLBACK)} families)")
 
         return dead

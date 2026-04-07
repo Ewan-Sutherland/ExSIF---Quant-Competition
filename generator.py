@@ -14,6 +14,7 @@ from templates import (
     DERIVATIVE_FIELDS, PCR_WINDOWS,
     MODEL77_ALL_FIELDS, MODEL77_TIER1_FIELDS, MODEL77_TIER2_FIELDS, MODEL77_TIER3_FIELDS,
     MODEL77_NEGATIVE_DIRECTION, DATASET_NEUTRALIZATION,
+    NEWS_EVENT_FIELDS, RP_UNDERUSED_FIELDS,
 )
 import templates as templates_mod
 
@@ -734,6 +735,13 @@ class AlphaGenerator:
                 p["model77_field"] = self.rng.choice(MODEL77_TIER2_FIELDS if MODEL77_TIER2_FIELDS else MODEL77_ALL_FIELDS)
             else:
                 p["model77_field"] = self.rng.choice(MODEL77_TIER3_FIELDS)
+        # v7.1: New signal dimension field pools
+        if "{news_event_field}" in template:
+            if NEWS_EVENT_FIELDS:
+                p["news_event_field"] = self.rng.choice(NEWS_EVENT_FIELDS)
+        if "{rp_field}" in template:
+            if RP_UNDERUSED_FIELDS:
+                p["rp_field"] = self.rng.choice(RP_UNDERUSED_FIELDS)
         return p
 
     def _mutate_params_for_mode(self, params, template, mode: str, metrics_hint: dict[str, Any] | None = None):
@@ -832,6 +840,21 @@ class AlphaGenerator:
                 out["model77_field"] = self.rng.choice(MODEL77_TIER2_FIELDS if MODEL77_TIER2_FIELDS else MODEL77_ALL_FIELDS)
             else:
                 out["model77_field"] = self.rng.choice(MODEL77_TIER3_FIELDS)
+
+        # v7.1: New signal dimension field mutation/filling
+        if "news_event_field" in out and self.rng.random() < 0.20:
+            if NEWS_EVENT_FIELDS:
+                out["news_event_field"] = self.rng.choice(NEWS_EVENT_FIELDS)
+        if "{news_event_field}" in template and "news_event_field" not in out:
+            if NEWS_EVENT_FIELDS:
+                out["news_event_field"] = self.rng.choice(NEWS_EVENT_FIELDS)
+
+        if "rp_field" in out and self.rng.random() < 0.20:
+            if RP_UNDERUSED_FIELDS:
+                out["rp_field"] = self.rng.choice(RP_UNDERUSED_FIELDS)
+        if "{rp_field}" in template and "rp_field" not in out:
+            if RP_UNDERUSED_FIELDS:
+                out["rp_field"] = self.rng.choice(RP_UNDERUSED_FIELDS)
 
         return out
 
