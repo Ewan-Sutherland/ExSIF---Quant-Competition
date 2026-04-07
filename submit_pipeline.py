@@ -284,31 +284,21 @@ class SubmitPipeline:
 def get_submit_schedule(owner: str) -> list[int]:
     """Return submission hours (UTC) for this owner.
 
-    Default schedule (configure in config.py SUBMIT_SCHEDULE):
-        Offset 0: hours [5, 17]
-        Offset 1: hours [6, 18]
-        Offset 2: hours [7, 19]
-        Offset 3: hours [8, 20]
+    Returns empty list if owner not in schedule (= disabled).
+    Configure in config.py SUBMIT_SCHEDULE.
     """
     import config
     schedule = getattr(config, "SUBMIT_SCHEDULE", {})
-    if owner in schedule:
-        return schedule[owner]
-
-    # Default: assign offset based on alphabetical order of known owners
-    all_owners = sorted(schedule.keys()) if schedule else [owner]
-    if owner not in all_owners:
-        all_owners.append(owner)
-        all_owners.sort()
-    offset = all_owners.index(owner) % 4
-    base_hours = [5, 17]
-    return [(h + offset) % 24 for h in base_hours]
+    return schedule.get(owner, [])
 
 
 def should_submit_now(owner: str) -> bool:
-    """Check if current UTC hour matches this owner's submission window."""
-    now = datetime.now(timezone.utc)
+    """Check if current UTC hour matches this owner's submission window.
+    Returns False if owner has no schedule (= disabled)."""
     hours = get_submit_schedule(owner)
+    if not hours:
+        return False
+    now = datetime.now(timezone.utc)
     return now.hour in hours
 
 

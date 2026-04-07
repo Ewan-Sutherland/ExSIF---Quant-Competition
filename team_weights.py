@@ -30,6 +30,15 @@ RAMP_SIMS = 20
 # Floor weight — even consensus-dead families keep this minimum
 FLOOR_WEIGHT = 0.03
 
+# v7.1: Hardcoded fallback when get_family_stats RPC times out
+# Based on observed family stats across all 3 bots — avg_sharpe < 0.15, submit_rate=0
+DEAD_FAMILIES_FALLBACK = {
+    "relationship", "cross_sectional", "sentiment",
+    "volume_flow", "fundamental_scores", "intraday",
+    "risk_beta", "expanded_fundamental", "volatility",
+    "social_scalar", "intraday_pattern", "options_analytics",
+}
+
 # Consensus dead threshold
 CONSENSUS_DEAD_WEIGHT = 0.04
 
@@ -248,8 +257,10 @@ class TeamWeights:
         except Exception:
             pass
 
+        rpc_succeeded = False
         try:
             team_rows = self._fetch_team_aggregate("family")
+            rpc_succeeded = True
             for row in team_rows:
                 if bool(row.get("consensus_dead", False)):
                     dead.add(row["stat_key"])
@@ -260,4 +271,10 @@ class TeamWeights:
                     dead.add(row["stat_key"])
         except Exception:
             pass
+
+        # v7.1: If RPC failed (timeout), use hardcoded fallback so LLM doesn't waste calls
+        if not rpc_succeeded and not dead:
+            dead.update(DEAD_FAMILIES_FALLBACK)
+            logger.info(f"[TEAM] Using dead families fallback ({len(DEAD_FAMILIES_FALLBACK)} families)")
+
         return dead

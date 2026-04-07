@@ -234,9 +234,20 @@ class AlphaBot:
                         self.core_signal_exhausted = counters["core_signal_exhausted"]
                     if counters.get("family_template_exhausted"):
                         self.family_template_exhausted = counters["family_template_exhausted"]
+                    # v7.1: Restore score-blocked cores and swept pairs
+                    if counters.get("score_negative_cores"):
+                        self._score_negative_cores = set(counters["score_negative_cores"])
+                    if counters.get("swept_keys") and hasattr(self, "universe_sweeper"):
+                        prev_swept = len(self.universe_sweeper._swept)
+                        self.universe_sweeper._swept.update(counters["swept_keys"])
+                        new_swept = len(self.universe_sweeper._swept) - prev_swept
+                        if new_swept:
+                            print(f"[WARM_START] Restored {new_swept} swept pairs from last session")
                     total_restored = sum(len(v) for v in counters.values() if isinstance(v, dict))
-                    if total_restored:
-                        print(f"[WARM_START] Restored {total_restored} refinement counter entries from last session")
+                    n_blocked = len(counters.get("score_negative_cores", []))
+                    if total_restored or n_blocked:
+                        print(f"[WARM_START] Restored {total_restored} refinement counter entries"
+                              f"{f', {n_blocked} blocked cores' if n_blocked else ''} from last session")
         except Exception as exc:
             print(f"[WARM_START] Failed to restore refinement counters: {exc}")
 
@@ -614,6 +625,13 @@ class AlphaBot:
 
         min_refinement_sharpe = getattr(config, "MIN_REFINEMENT_SHARPE", 1.20)
         if sharpe < min_refinement_sharpe:
+            return
+
+        # v7.1: Block extreme-turnover expressions from refinement queue
+        # Combos with turnover=1.0 produce inflated Sharpe (S=23+) but collapse
+        # when any holding period is forced. Refining them wastes ~12 sims each.
+        if turnover is not None and turnover >= 0.95:
+            print(f"[TURNOVER_BLOCK] S={sharpe:.1f} T={turnover:.3f} — skipping refinement (turnover too high)")
             return
 
         # Check if this core signal has been exhausted too many times

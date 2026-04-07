@@ -133,13 +133,16 @@ def main() -> None:
     except Exception as e:
         print(f"[SHUTDOWN_WARN] Could not publish team stats: {e}")
 
-    # 4. Save bot state + refinement counters
+    # 4. Save bot state + refinement counters + session state
     try:
         refinement_counters = {
             "refinement_attempts_by_base": getattr(bot, "refinement_attempts_by_base", {}),
             "refinement_attempts_by_core": getattr(bot, "refinement_attempts_by_core", {}),
             "core_signal_exhausted": getattr(bot, "core_signal_exhausted", {}),
             "family_template_exhausted": getattr(bot, "family_template_exhausted", {}),
+            # v7.1: Persist across restarts to avoid re-sweeping / re-testing blocked cores
+            "score_negative_cores": list(getattr(bot, "_score_negative_cores", set())),
+            "swept_keys": list(getattr(bot.universe_sweeper, "_swept", set())) if hasattr(bot, "universe_sweeper") else [],
         }
         storage.save_bot_state(
             status="interrupted" if (in_flight_runs or mid_refinement_ids) else "stopped",
@@ -147,8 +150,11 @@ def main() -> None:
             interrupted_refinement_ids=mid_refinement_ids,
             refinement_counters=refinement_counters,
         )
+        n_swept = len(refinement_counters.get("swept_keys", []))
+        n_blocked = len(refinement_counters.get("score_negative_cores", []))
         print(f"[SHUTDOWN] Bot state saved (completions={getattr(bot, 'total_completions', 0)}, "
-              f"refinement_counters={sum(len(v) for v in refinement_counters.values())} entries)")
+              f"refinement_counters={sum(len(v) for v in refinement_counters.values() if isinstance(v, dict))} entries, "
+              f"swept={n_swept}, blocked_cores={n_blocked})")
     except Exception as e:
         print(f"[SHUTDOWN_WARN] Could not save bot state: {e}")
 
