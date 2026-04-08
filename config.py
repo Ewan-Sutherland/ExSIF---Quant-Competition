@@ -110,7 +110,7 @@ AUTO_SUBMIT = False
 # The pipeline re-checks all scores, groups by core signal, submits greedily.
 # Set your schedule here or let it auto-assign based on alphabetical order.
 SUBMIT_SCHEDULE = {
-    # "ewansutherland@icloud.com": [5, 17],   # 5am and 5pm UTC
+    "ewansutherland@icloud.com": [5, 17],   # 5am and 5pm UTC
     # "gmpc201@exeter.ac.uk": [6, 18],         # 6am and 6pm UTC
     # "tns203@exeter.ac.uk": [7, 19],           # 7am and 7pm UTC
     # "lucacroci2005@gmail.com": [8, 20],       # 8am and 8pm UTC
