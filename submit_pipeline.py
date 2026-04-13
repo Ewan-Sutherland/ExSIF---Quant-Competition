@@ -71,6 +71,37 @@ class SubmitPipeline:
         negative = [a for a in alphas if a.get("live_score") is not None and a["live_score"] < 0]
         unknown = [a for a in alphas if a.get("live_score") is None]
 
+        # v7.2: Retry unknowns once after a pause — API can be intermittent
+        if unknown:
+            print(f"\n  {len(unknown)} unknown scores — retrying after 10s pause...")
+            time.sleep(10)
+            still_unknown = []
+            for a in unknown:
+                alpha_id = a.get("alpha_id")
+                if not alpha_id:
+                    still_unknown.append(a)
+                    continue
+                try:
+                    perf = self.client.check_before_after_performance(
+                        alpha_id, competition_id=self.config.IQC_COMPETITION_ID,
+                    )
+                    score = perf.get("_score_change")
+                    if score is not None:
+                        a["live_score"] = score
+                        direction = "+" if score > 0 else ""
+                        print(f"    ✅ {a.get('family','')}/{a.get('template_id','')} "
+                              f"S={a.get('sharpe',0):.2f} → score: {direction}{score}")
+                        if score >= self.MIN_SCORE_TO_SUBMIT:
+                            positive.append(a)
+                        elif score < 0:
+                            negative.append(a)
+                    else:
+                        still_unknown.append(a)
+                except Exception:
+                    still_unknown.append(a)
+                time.sleep(3)
+            unknown = still_unknown
+
         print(f"\n  After re-check: {len(positive)} positive, {len(negative)} negative, {len(unknown)} unknown")
 
         for a in negative:
@@ -425,6 +456,7 @@ class TeammateScoreChecker:
     and updates them in Supabase so you can submit manually.
     """
 
+    MAX_TEAMMATE_CHECKS = 999  # Check all teammate alphas
     DELAY_BETWEEN_CHECKS = 4  # seconds between API calls
 
     def __init__(self, storage, client, config):
@@ -433,8 +465,9 @@ class TeammateScoreChecker:
         self.config = config
 
     def run(self, teammate_owners: list[str]) -> dict:
-        """Check scores for all teammates' ready alphas."""
+        """Check scores for teammates' ready alphas by re-simulating through own credentials."""
         import time
+        import json
         from datetime import datetime, timezone
 
         total_checked = 0
@@ -448,29 +481,85 @@ class TeammateScoreChecker:
             print(f"  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
             print(f"{'='*60}\n")
 
-            # Load their ready + unverified alphas
+            # Load their ready + unverified alphas (sorted by sharpe desc)
             alphas = self._load_teammate_alphas(owner)
             if not alphas:
                 print(f"  No ready/unverified alphas for {owner}")
                 continue
 
-            print(f"  Found {len(alphas)} alphas to check\n")
+            # Only check top N to avoid burning too many sim slots
+            alphas = alphas[:self.MAX_TEAMMATE_CHECKS]
+            print(f"  Checking {len(alphas)} alphas (by sharpe desc)\n")
 
             for i, a in enumerate(alphas):
-                alpha_id = a.get("alpha_id")
                 expr = a.get("expression", "")
                 family = a.get("family", "")
                 sharpe = a.get("sharpe", 0)
-                old_score = a.get("score_change")
+                settings_raw = a.get("settings_json", "{}")
 
-                if not alpha_id:
-                    print(f"    [{i+1}/{len(alphas)}] No alpha_id — skipping")
+                if not expr:
+                    print(f"    [{i+1}/{len(alphas)}] No expression — skipping")
                     total_unknown += 1
                     continue
 
-                # Try checking score with current client
+                # Parse settings
+                if isinstance(settings_raw, str):
+                    try:
+                        settings = json.loads(settings_raw)
+                    except (json.JSONDecodeError, TypeError):
+                        settings = {}
+                else:
+                    settings = settings_raw or {}
+
+                if not settings:
+                    print(f"    [{i+1}/{len(alphas)}] No settings — skipping")
+                    total_unknown += 1
+                    continue
+
+                # Re-simulate through OWN account to get own alpha_id
+                try:
+                    sim_id = self.client.submit_simulation(expr, settings)
+                except Exception as exc:
+                    if "429" in str(exc) or "CONCURRENT" in str(exc).upper():
+                        print(f"    [{i+1}/{len(alphas)}] ⚠️ Rate limited — stopping teammate check")
+                        break
+                    print(f"    [{i+1}/{len(alphas)}] ⚠️ Sim failed: {exc}")
+                    total_unknown += 1
+                    continue
+
+                # Poll until complete (max 90s)
+                result = None
+                for poll in range(18):
+                    time.sleep(5)
+                    try:
+                        result = self.client.poll_simulation(sim_id)
+                        if result.get("status") in ("completed", "failed", "timed_out"):
+                            break
+                    except Exception:
+                        pass
+
+                if not result or result.get("status") != "completed":
+                    print(f"    [{i+1}/{len(alphas)}] ⚠️ {family} S={sharpe:.2f} — sim timed out")
+                    total_unknown += 1
+                    continue
+
+                # Extract alpha_id from OUR simulation
+                alpha_id = None
+                try:
+                    alpha_url = result.get("alpha", "")
+                    if alpha_url:
+                        alpha_id = alpha_url.rstrip("/").split("/")[-1]
+                except Exception:
+                    pass
+
+                if not alpha_id:
+                    print(f"    [{i+1}/{len(alphas)}] ⚠️ {family} S={sharpe:.2f} — no alpha_id in result")
+                    total_unknown += 1
+                    continue
+
+                # Now check before-after with OUR alpha_id
                 score = None
-                for attempt in range(3):
+                for attempt in range(2):
                     try:
                         perf = self.client.check_before_after_performance(
                             alpha_id,
@@ -481,22 +570,17 @@ class TeammateScoreChecker:
                         score_after = perf.get("_score_after")
                         if score is not None:
                             break
-                    except Exception as exc:
-                        if attempt == 2:
-                            print(f"    [{i+1}/{len(alphas)}] ⚠️ API error: {exc}")
-                    if attempt < 2:
-                        time.sleep(self.DELAY_BETWEEN_CHECKS)
+                    except Exception:
+                        pass
+                    if attempt < 1:
+                        time.sleep(3)
 
                 if score is not None:
                     direction = "📈" if score > 0 else "📉" if score < 0 else "➡️"
                     print(f"    [{i+1}/{len(alphas)}] {direction} {family} S={sharpe:.2f} → "
-                          f"score: {score:+.0f} (before={score_before or 0:.0f}, after={score_after or 0:.0f})")
+                          f"score: {score:+.0f}")
 
-                    # Update local dict so summary uses fresh data
                     a["score_change"] = score
-                    a["score_before"] = score_before
-                    a["score_after"] = score_after
-
                     # Update in Supabase
                     try:
                         self.storage._patch("ready_alphas", {"id": a["id"]}, {
@@ -505,8 +589,8 @@ class TeammateScoreChecker:
                             "score_change": score,
                             "status": "ready" if score >= 0 else "rejected",
                         })
-                    except Exception as exc:
-                        print(f"    ⚠️ Could not update score in DB: {exc}")
+                    except Exception:
+                        pass
 
                     if score > 0:
                         total_positive += 1
@@ -517,14 +601,12 @@ class TeammateScoreChecker:
                     print(f"    [{i+1}/{len(alphas)}] ❓ {family} S={sharpe:.2f} → score unavailable")
                     total_unknown += 1
 
-                time.sleep(self.DELAY_BETWEEN_CHECKS)
-
             # Print summary for this teammate
             pos_alphas = [a for a in alphas if a.get("score_change") is not None and a["score_change"] > 0]
             if pos_alphas:
                 print(f"\n  ✅ POSITIVE ALPHAS FOR {owner} (submit these manually):")
                 for a in sorted(pos_alphas, key=lambda x: x.get("score_change", 0), reverse=True):
-                    print(f"    alpha_id={a.get('alpha_id')} score={a.get('score_change', '?'):+.0f} "
+                    print(f"    score={a.get('score_change', '?'):+.0f} "
                           f"S={a.get('sharpe', 0):.2f} {a.get('family', '')}")
 
         print(f"\n{'='*60}")

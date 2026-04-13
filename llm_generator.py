@@ -204,8 +204,7 @@ VALID_FIELDS.update({
 
 # v6.2.1: New untapped fields for 10 new template families
 VALID_FIELDS.update({
-    # Supply chain (pv13)
-    "pv13_custretsig_retsig",
+    # Supply chain (pv13) — pv13_custretsig_retsig REMOVED: consistently S=-1.4
     # RavenPack category sentiment
     "rp_ess_insider", "rp_css_legal", "rp_nip_earnings",  # nws18_event_relevance REMOVED — event field
     "rp_css_mna", "rp_ess_mna", "rp_css_revenue", "rp_ess_revenue",
@@ -323,7 +322,7 @@ Step 1: Pick a MARKET INEFFICIENCY from the UNEXPLORED list below.
 
   UNEXPLORED FAMILIES (prioritise in this order):
   1. SUPPLY CHAIN (fewest users on entire platform — academic backing):
-     rel_ret_cust, rel_ret_comp, pv13_com_page_rank, pv13_custretsig_retsig
+     rel_ret_cust, rel_ret_comp, pv13_com_page_rank, pv13_5l_scibr
      IDEA: Customer returns predict supplier returns with 5-20 day lag (Cohen & Frazzini)
   2. RAVENPACK CATEGORY SENTIMENT (category-specific news, not generic):
      rp_ess_mna, rp_ess_earnings, rp_css_credit, rp_css_legal, rp_ess_insider, rp_nip_earnings
@@ -460,7 +459,7 @@ PRICE & VOLUME: close, open, high, low, vwap, returns, volume, adv20, cap, share
   systematic_risk_last_60_days, systematic_risk_last_90_days
 
 ★ FRESH SUPPLY CHAIN:
-  pv13_com_page_rank, pv13_custretsig_retsig, pv13_5l_scibr, pv13_6l_scibr
+  pv13_com_page_rank, pv13_5l_scibr, pv13_5l_scibr, pv13_6l_scibr
 
 ★ FRESH SOCIAL SENTIMENT: scl12_buzz, scl12_sentiment, snt_buzz, snt_value, snt_buzz_ret
 

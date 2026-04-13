@@ -526,7 +526,7 @@ LLM_AST_RETRY_MAX = 1      # v6.1: retry failed expressions once with error feed
 # teammates' ready alphas so you can manually submit on their behalf.
 # Toggle off once they can check scores independently.
 # ═══════════════════════════════════════════════════════════════
-CHECK_TEAMMATE_SCORES = True
+CHECK_TEAMMATE_SCORES = True  # v7.2: Re-simulates through own credentials, checks top 10 per teammate
 TEAMMATE_OWNERS = [
     "tns203@exeter.ac.uk",
     "lucacroci2005@gmail.com",

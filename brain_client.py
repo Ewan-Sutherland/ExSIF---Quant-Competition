@@ -515,8 +515,8 @@ class BrainClient:
         retry_after = float(response.headers.get("Retry-After", 1.0))
 
         # Poll for results
-        max_polls = 20
-        poll_interval = max(retry_after, 1.0)
+        max_polls = 30
+        poll_interval = max(retry_after, 1.5)
 
         for poll_num in range(1, max_polls + 1):
             time.sleep(poll_interval)

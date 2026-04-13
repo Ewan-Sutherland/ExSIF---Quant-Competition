@@ -132,6 +132,10 @@ class UniverseSweeper:
                 'vec_avg', 'vec_sum', 'signed_power', 'inverse', 'reverse', 'hump',
                 'kth_element', 'range', 'true', 'false',
                 'industry', 'subindustry', 'sector', 'market', 'exchange',
+                # v7.2: keyword args + logical ops that appear as tokens
+                'rettype', 'lag', 'std', 'not', 'and', 'or', 'filter',
+                'days_from_last_change', 'last_diff_value',
+                'multiply', 'add', 'subtract', 'divide',
             }
             field_tokens = tokens - operators
             # Check for fields not in our valid set

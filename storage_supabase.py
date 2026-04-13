@@ -230,7 +230,7 @@ class Storage:
             "checks_passed": metrics.checks_passed,
             "submit_eligible": metrics.submit_eligible,
             "fail_reason": metrics.fail_reason,
-        })
+        }, upsert=True, on_conflict="run_id")
 
     # ── Submissions ───────────────────────────────────────────────────
 

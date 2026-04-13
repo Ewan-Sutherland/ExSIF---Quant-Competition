@@ -76,6 +76,10 @@ class AlphaBot:
         self._rate_limited_queue: list[tuple] = []  # [(candidate, run), ...]
         # v7.2: Rate limit cooldown — prevent fill loop from spinning after 429
         self._rate_limit_until: float = 0.0  # timestamp until which we skip submissions
+        # v7.2: Prevent duplicate completion processing (sweep + poll overlap)
+        self._processed_run_ids: set[str] = set()
+        # v7.2: Lock to prevent re-entrant optimization during Optuna variant testing
+        self._optimizing: bool = False
 
         # v6.0: Optuna-based settings optimizer for near-passers
         if _HAS_OPTUNA:
@@ -428,6 +432,11 @@ class AlphaBot:
             self.scheduler.remove(sim_id)
             self._rate_limit_until = 0.0  # v7.2: clear cooldown — slot freed
 
+            # v7.2: Skip if already processed (prevents duplicate optimize from sweep+poll overlap)
+            if run_id in self._processed_run_ids:
+                continue
+            self._processed_run_ids.add(run_id)
+
             if status == "completed":
                 self._handle_completed(run_id, result)
 
@@ -594,12 +603,15 @@ class AlphaBot:
         # check be the judge. v5.4 blocked 6 eligible alphas that may have passed.
         # The data-category proxy was wrong — cost us real submissions.
         if decision.should_submit:
-            try:
-                self._optimize_and_submit(candidate_id, run_id, result, metrics)
-            except Exception as exc:
-                print(f"[OPTIMIZE_ERROR] run_id={run_id} error={exc}")
-                import traceback
-                traceback.print_exc()
+            if self._optimizing:
+                print(f"[OPTIMIZE_DEFER] run_id={run_id} — already optimizing, will be swept later")
+            else:
+                try:
+                    self._optimize_and_submit(candidate_id, run_id, result, metrics)
+                except Exception as exc:
+                    print(f"[OPTIMIZE_ERROR] run_id={run_id} error={exc}")
+                    import traceback
+                    traceback.print_exc()
 
         if self.completed_runs % config.REPORT_EVERY_N_COMPLETIONS == 0:
             self._print_progress_report()
@@ -706,6 +718,14 @@ class AlphaBot:
         if turnover is not None and turnover >= 0.95:
             print(f"[TURNOVER_BLOCK] S={sharpe:.1f} T={turnover:.3f} — skipping refinement (turnover too high)")
             return
+
+        # v7.2: Block CW-blacklisted expressions from refinement queue
+        # CW is expression-level — changing settings won't fix it, wastes 3 sim slots
+        candidate_row_cw = self.storage.get_candidate_by_id(candidate_id)
+        if candidate_row_cw:
+            canon = candidate_row_cw.get("canonical_expression", "")
+            if canon and canon in self.concentrated_weight_exprs:
+                return  # Silently skip — CW is unfixable via settings
 
         # Check if this core signal has been exhausted too many times
         # Prevents the opt_01 problem: 33 different candidates for the same core signal
@@ -904,6 +924,14 @@ class AlphaBot:
            AUTO_SUBMIT=False → insert into ready_alphas table for manual submission
         """
         import json as _json
+        self._optimizing = True
+        try:
+            self._optimize_and_submit_inner(candidate_id, run_id, result, metrics)
+        finally:
+            self._optimizing = False
+
+    def _optimize_and_submit_inner(self, candidate_id: str, run_id: str, result: dict, metrics) -> None:
+        import json as _json
 
         candidate_row = self.storage.get_candidate_by_id(candidate_id)
         if not candidate_row:
@@ -1097,14 +1125,14 @@ class AlphaBot:
             for vi, (desc, vsettings) in enumerate(pending_variants):
                 # Wait between submissions so earlier sims complete & free concurrent slots
                 if vi > 0:
-                    for _wait in range(3):
+                    for _wait in range(2):
                         self._poll_running()
                         for _bd, _bvs, _bsid in batch_sims:
                             try:
                                 self.client.poll_simulation(_bsid)
                             except Exception:
                                 pass
-                        _time.sleep(5)
+                        _time.sleep(3)
                 submitted = False
                 last_exc = None
                 for retry in range(6):  # up to 6 retries
@@ -1125,7 +1153,7 @@ class AlphaBot:
                                         self.client.poll_simulation(_bsid)
                                     except Exception:
                                         pass
-                                _time.sleep(8)
+                                _time.sleep(5)
                         else:
                             print(f"  [Variant] {desc} — submit failed: {exc}")
                             break
@@ -1135,7 +1163,8 @@ class AlphaBot:
 
             # Poll all submitted variants until done
             batch_results = {}
-            deadline = _time.time() + 5 * 60  # 5 min timeout
+            deadline = _time.time() + 8 * 60  # 8 min timeout
+            _poll_count = 0
             while len(batch_results) < len(batch_sims) and _time.time() < deadline:
                 for desc, vsettings, sid in batch_sims:
                     if sid in batch_results:
@@ -1144,10 +1173,14 @@ class AlphaBot:
                         result_v = self.client.poll_simulation(sid)
                         if result_v["status"] in ("completed", "failed", "timed_out"):
                             batch_results[sid] = (desc, vsettings, result_v)
+                            print(f"  [Variant] {len(batch_results)}/{len(batch_sims)} results received...")
                     except Exception:
                         pass
                 if len(batch_results) < len(batch_sims):
-                    _time.sleep(8)
+                    _poll_count += 1
+                    if _poll_count % 6 == 0:  # ~30s
+                        print(f"  [Polling] {len(batch_results)}/{len(batch_sims)} complete, waiting...")
+                    _time.sleep(5)
 
             # Process batch results
             for desc, vsettings, sid in batch_sims:
