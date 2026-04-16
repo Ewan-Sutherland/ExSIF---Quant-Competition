@@ -86,6 +86,12 @@ class AlphaGenerator:
         self._epoch_eligible_count = 0 # Eligible alphas found in current epoch
         self._epoch_extended = False    # Whether current epoch has been extended
         self._epoch_skipped = False     # Whether current epoch was skipped early
+        # v7.2.1: Per-epoch self-correlation failure tracker
+        # When a family keeps producing eligibles that bounce off the
+        # team-wide saturation wall, down-weight it for the rest of this
+        # epoch only. Resets on epoch advance so cycling still works.
+        self._epoch_corr_fails: dict[str, int] = {}
+        self._epoch_penalty_logged: set[str] = set()  # families we've already reported penalties for
         self._init_epoch()              # Set initial epoch from UTC time
 
     # ============================
@@ -106,6 +112,9 @@ class AlphaGenerator:
         self._epoch_eligible_count = 0
         self._epoch_extended = False
         self._epoch_skipped = False
+        # v7.2.1: Reset saturation tracker for new epoch
+        self._epoch_corr_fails = {}
+        self._epoch_penalty_logged = set()
         cats = self.EPOCH_SCHEDULE[self._epoch_index]
         print(f"[EPOCH] Window {self._epoch_index}/{len(self.EPOCH_SCHEDULE)-1}: "
               f"focusing on {cats}")
@@ -149,6 +158,9 @@ class AlphaGenerator:
             self._epoch_eligible_count = 0
             self._epoch_extended = False
             self._epoch_skipped = False
+            # v7.2.1: Reset saturation tracker — fresh start per epoch
+            self._epoch_corr_fails = {}
+            self._epoch_penalty_logged = set()
             cats = self.EPOCH_SCHEDULE[self._epoch_index]
             print(f"[EPOCH] Advancing {old_idx} → {self._epoch_index}: now focusing on {cats}")
 
@@ -171,6 +183,8 @@ class AlphaGenerator:
             "epoch_gen_count": self._epoch_gen_count,
             "epoch_eligible_count": self._epoch_eligible_count,
             "epoch_extended": self._epoch_extended,
+            # v7.2.1: Persist saturation tracker so restarts mid-epoch don't lose learning
+            "epoch_corr_fails": dict(self._epoch_corr_fails),
         }
 
     def restore_epoch_state(self, state: dict):
@@ -182,9 +196,27 @@ class AlphaGenerator:
         self._epoch_gen_count = state.get("epoch_gen_count", 0)
         self._epoch_eligible_count = state.get("epoch_eligible_count", 0)
         self._epoch_extended = state.get("epoch_extended", False)
+        # v7.2.1: Restore saturation tracker
+        self._epoch_corr_fails = dict(state.get("epoch_corr_fails", {}))
+        self._epoch_penalty_logged = set()  # Re-log penalties post-restart (sanity check)
         cats = self.EPOCH_SCHEDULE[self._epoch_index]
         print(f"[EPOCH] Restored: window {self._epoch_index} ({cats}), "
-              f"{self._epoch_gen_count} gens, {self._epoch_eligible_count} eligible")
+              f"{self._epoch_gen_count} gens, {self._epoch_eligible_count} eligible"
+              f"{f', {len(self._epoch_corr_fails)} families with corr-fails' if self._epoch_corr_fails else ''}")
+
+    def record_corr_fail(self, family: str) -> None:
+        """v7.2.1: Called by bot when an eligible alpha fails self-correlation.
+        Tracked per-family, per-epoch. Resets on epoch advance."""
+        if not family:
+            return
+        self._epoch_corr_fails[family] = self._epoch_corr_fails.get(family, 0) + 1
+        n = self._epoch_corr_fails[family]
+        # Log only on meaningful threshold crossings to avoid spam
+        key = f"{family}:{n}"
+        if n >= 2 and key not in self._epoch_penalty_logged:
+            self._epoch_penalty_logged.add(key)
+            print(f"[SATURATION] family={family} has {n} self-corr fails this epoch — "
+                  f"down-weighting for rest of epoch {self._epoch_index}")
 
     # ============================
     # PUBLIC
@@ -682,6 +714,19 @@ class AlphaGenerator:
                 else:
                     base *= 0.02  # Near-zero for non-epoch (but not blocked)
             # When exploring outside, use normal weights (no epoch filter)
+
+            # v7.2.1: Per-epoch saturation penalty — if this family has been
+            # bouncing off the team-wide self-correlation wall, ramp down
+            # its weight for the rest of the epoch so we stop wasting sims
+            # on saturated search space. Thresholds calibrated from overnight
+            # logs where 29/43 OPTIMIZE_STARTs failed self-corr.
+            n_corr_fails = self._epoch_corr_fails.get(fam, 0)
+            if n_corr_fails >= 3:
+                base *= 0.10    # Near-zero but leaves exploration escape hatch
+            elif n_corr_fails == 2:
+                base *= 0.35    # Heavy damping
+            elif n_corr_fails == 1:
+                base *= 0.70    # Mild discount
 
             weights.append(max(base, 0.001))
 
@@ -1204,6 +1249,54 @@ class AlphaGenerator:
         if "{rp_field}" in template and "rp_field" not in out:
             if RP_UNDERUSED_FIELDS:
                 out["rp_field"] = self.rng.choice(RP_UNDERUSED_FIELDS)
+
+        # v7.2.1: Missing handlers that previously caused KeyError on refinement
+        # template-switching (e.g. corr_pipeline cp_02 → cp_01 where sister templates
+        # use different fresh_* placeholders than the parent).
+        # Pattern: if pool non-empty and placeholder used but key missing, fill it;
+        # mutate existing key with small probability for exploration.
+        if "fresh_fund_field" in out and self.rng.random() < 0.15:
+            if FRESH_FUND_FIELDS:
+                out["fresh_fund_field"] = self.rng.choice(FRESH_FUND_FIELDS)
+        if "{fresh_fund_field}" in template and "fresh_fund_field" not in out:
+            if FRESH_FUND_FIELDS:
+                out["fresh_fund_field"] = self.rng.choice(FRESH_FUND_FIELDS)
+            else:
+                # Fallback to general fundamental pool so template.format doesn't crash
+                out["fresh_fund_field"] = self.rng.choice(FUNDAMENTAL_FIELDS)
+
+        if "fn_field" in out and self.rng.random() < 0.15:
+            if FRESH_FN_FIELDS:
+                out["fn_field"] = self.rng.choice(FRESH_FN_FIELDS)
+        if "{fn_field}" in template and "fn_field" not in out:
+            if FRESH_FN_FIELDS:
+                out["fn_field"] = self.rng.choice(FRESH_FN_FIELDS)
+            else:
+                out["fn_field"] = self.rng.choice(FUNDAMENTAL_FIELDS)
+
+        if "fresh_est_field" in out and self.rng.random() < 0.15:
+            if FRESH_EST_FIELDS:
+                out["fresh_est_field"] = self.rng.choice(FRESH_EST_FIELDS)
+        if "{fresh_est_field}" in template and "fresh_est_field" not in out:
+            if FRESH_EST_FIELDS:
+                out["fresh_est_field"] = self.rng.choice(FRESH_EST_FIELDS)
+            else:
+                # Fallback to general analyst pool
+                out["fresh_est_field"] = self.rng.choice(ANALYST_FIELDS)
+
+        if "deriv_field" in out and self.rng.random() < 0.15:
+            if DERIVATIVE_FIELDS:
+                out["deriv_field"] = self.rng.choice(DERIVATIVE_FIELDS)
+        if "{deriv_field}" in template and "deriv_field" not in out:
+            if DERIVATIVE_FIELDS:
+                out["deriv_field"] = self.rng.choice(DERIVATIVE_FIELDS)
+
+        if "beta_field" in out and self.rng.random() < 0.15:
+            if RISK_BETA_FIELDS:
+                out["beta_field"] = self.rng.choice(RISK_BETA_FIELDS)
+        if "{beta_field}" in template and "beta_field" not in out:
+            if RISK_BETA_FIELDS:
+                out["beta_field"] = self.rng.choice(RISK_BETA_FIELDS)
 
         return out
 

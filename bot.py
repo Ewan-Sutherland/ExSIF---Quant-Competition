@@ -67,6 +67,11 @@ class AlphaBot:
         self._last_eligible_time = None
         self._stall_level = 0  # escalation level 0-4
         self._sims_since_last_eligible = 0
+        # v7.2.1: Idle detection — consecutive ticks with zero sim activity
+        self._idle_ticks = 0
+        self._last_submit_tick = 0
+        # v7.2.1: LLM exhaustion cooldown timestamp
+        self._llm_exhausted_until = 0.0
         # v6.0: Track refinement attempts per CORE SIGNAL to prevent same expression via different candidates
         self.refinement_attempts_by_core: dict[str, int] = {}
         # v6.0: Track recently simulated LLM expressions to prevent duplicates
@@ -290,8 +295,17 @@ class AlphaBot:
         self.client.ensure_session()
         self._poll_running()
         self._check_stall()   # v6.2.1: stall detection
+        self._check_idle()    # v7.2.1: idle detection (no work submitted for N ticks)
         self._maybe_run_submit_pipeline()  # v7.0: scheduled auto-submission
         self._fill_capacity()
+
+        # v7.2.1: Periodic stale-sim timeout sweep — every 20 ticks (~5 min)
+        # Prevents one stuck sim from holding a scheduler slot indefinitely.
+        if getattr(self, "_tick_count", 0) % 20 == 19:
+            try:
+                self.mark_stale_runs_timed_out()
+            except Exception as exc:
+                print(f"[STALE_SWEEP_ERROR] {exc}")
 
         # v7.2: Periodic tick confirmation (every 20 ticks)
         self._tick_count = getattr(self, "_tick_count", 0) + 1
@@ -404,6 +418,48 @@ class AlphaBot:
                 print("[STALL_RECOVERY_L3] Full exploration reset — clearing template exhaustion")
                 self.family_template_exhausted.clear()
                 self.core_signal_exhausted.clear()
+
+    # =========================================================
+    # v7.2.1: Idle detection — handles the case where the main loop is
+    # ticking but nothing is being submitted (LLM exhausted + refinement
+    # queue empty + combo gen producing nothing). Different from stall
+    # detection which is keyed on sims_since_last_eligible (that counter
+    # doesn't advance when no sims are being run at all).
+    # =========================================================
+
+    def _check_idle(self) -> None:
+        import time as _time
+        # If scheduler has active sims, not idle
+        if self.scheduler.active_count() > 0:
+            self._idle_ticks = 0
+            return
+        # If we're in a rate-limit cooldown, not considered idle
+        if _time.time() < self._rate_limit_until:
+            self._idle_ticks = 0
+            return
+
+        self._idle_ticks += 1
+
+        # Fire recovery every 5 idle ticks (≈ 5×POLL_INTERVAL, ~75s–5min depending on config)
+        if self._idle_ticks > 0 and self._idle_ticks % 5 == 0:
+            print(f"[IDLE_DETECTED] {self._idle_ticks} ticks with no active sims — forcing template generation")
+            try:
+                # Force a capacity fill pass that bypasses LLM (if exhausted)
+                # _fill_capacity will already be called after this in the tick,
+                # but we also nudge the generator to cycle families.
+                if hasattr(self.generator, "_category_usage"):
+                    # Reset category rotation to encourage fresh picks
+                    self.generator._generation_count = 0
+                # Also un-exhaust the template pool so we can re-try stuff
+                if self._idle_ticks >= 15:
+                    self.family_template_exhausted.clear()
+                    print("[IDLE_RECOVERY] Cleared family_template_exhausted")
+                if self._idle_ticks >= 30:
+                    # Nuclear — clear core_signal_exhausted too
+                    self.core_signal_exhausted.clear()
+                    print("[IDLE_RECOVERY] Cleared core_signal_exhausted (deep idle)")
+            except Exception as exc:
+                print(f"[IDLE_RECOVERY_ERROR] {exc}")
 
     # =========================================================
     # Polling
@@ -1029,6 +1085,14 @@ class AlphaBot:
         if check["_passed"] is False:
             if core:
                 self.rejected_cores.add(core)
+            # v7.2.1: Tell the generator this family just bounced off the
+            # saturation wall — it'll down-weight the family for the rest
+            # of the current epoch so we stop wasting sims on the same space.
+            try:
+                if hasattr(self.generator, "record_corr_fail"):
+                    self.generator.record_corr_fail(family)
+            except Exception:
+                pass
             print(
                 f"[OPTIMIZE_CORR_FAIL] ❌ Self-correlation failed "
                 f"(corr={check['_self_correlation']}, with={check['_correlated_with']})\n"
