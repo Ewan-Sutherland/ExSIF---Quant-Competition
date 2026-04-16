@@ -295,7 +295,7 @@ class SignalCombiner:
         result = []
         i = 0
         while i < len(expr):
-            if expr[i:i+5] == 'rank(' and (i == 0 or not expr[i-1].isalpha()):
+            if expr[i:i+5] == 'rank(' and (i == 0 or not (expr[i-1].isalpha() or expr[i-1] == '_')):
                 depth = 1
                 j = i + 5
                 while j < len(expr) and depth > 0:
