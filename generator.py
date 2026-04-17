@@ -721,8 +721,10 @@ class AlphaGenerator:
                 base *= bias.get(fam, 1.0)
 
             # v7.2: Epoch filtering — heavy weight for epoch categories
+            # v7.2.1: DISABLED in sprint mode — let Thompson sampling converge
+            # naturally on productive families instead of forced rotation
             cat = self._FAMILY_TO_CATEGORY.get(fam, "")
-            if not explore_outside:
+            if not getattr(config, "SPRINT_MODE", False) and not explore_outside:
                 if cat in active_cats:
                     base *= 10.0  # Strong boost for epoch categories
                 else:

@@ -15,6 +15,9 @@ DB_PATH = DATA_DIR / "bot.db"
 # v6.0.1: Default to supabase for team distribution — everyone shares same data
 STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "supabase")
 
+# v7.2.1: Sprint mode — 5-day competition push. Set False to revert to normal.
+SPRINT_MODE = True
+
 # Supabase credentials (only needed if STORAGE_BACKEND = "supabase")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
@@ -59,6 +62,11 @@ NEAR_PASSER_MIN_SHARPE = 1.20
 NEAR_PASSER_MIN_FITNESS = 0.65
 NEAR_PASSER_MAX_TURNOVER = 0.75
 REFINEMENT_PROBABILITY = 0.50  # v7.2.1: 50/50 refine vs fresh (was 0.40)
+
+# v7.2.1: Sprint mode override — gap mining produces more near-passers,
+# so refinement needs more budget to keep the queue from growing unbounded
+if SPRINT_MODE:
+    REFINEMENT_PROBABILITY = 0.55  # 55% refine, 45% fresh
 
 MIN_REFINEMENT_SHARPE = 0.95
 FRONTIER_MIN_SHARPE = 0.95
@@ -542,3 +550,75 @@ COORDINATED_SUBMIT_OWNERS = [
 # Only the coordinator ranks globally and orchestrates
 IS_COORDINATOR = True  # Ewan's config = True, team config = False
 MAX_SUBMISSIONS_PER_WINDOW = 15
+
+# ═══════════════════════════════════════════════════════════════
+# v7.2.1: SPRINT MODE CONFIG
+# Concentrates sims on proven families with unused fields.
+# Disables epoch rotation, suppresses dead families.
+# Toggle SPRINT_MODE at top of this file.
+# ═══════════════════════════════════════════════════════════════
+
+# Gap mining probability: when generating fresh candidates,
+# what % should use the field-gap miner vs normal templates
+GAP_MINING_PROBABILITY = 0.65 if SPRINT_MODE else 0.0
+
+# Increased refinement depth for sprint
+if SPRINT_MODE:
+    MAX_REFINEMENT_PER_CORE = 12     # was 6 — go deeper on promising cores
+    OPTIMIZE_VARIANTS = 8            # was 5 — more settings per optimize pass
+
+# Suppress dead families (0 eligible after 50+ sims)
+DEAD_FAMILY_WEIGHT = 0.01  # near-zero but not zero (allows rare exploration)
+DEAD_FAMILIES = {
+    "fundamental_scores", "analyst_sentiment", "expanded_fundamental",
+    "price_vol_corr", "ravenpack_cat", "size_value", "llm_novel",
+    "derivative_interaction", "risk_beta", "news_sentiment", "volatility",
+    "earnings_momentum", "quality_trend", "fundamental_vol", "model77_anomaly",
+    "intraday_pattern", "fscore", "options_analytics", "analyst_deep",
+    "social_scalar", "wild_combos", "risk_metrics", "intraday",
+    # Research families with 0% eligible after 50+ sims
+    "deriv_score", "beta_signal", "regression_alpha", "pipeline_select",
+    "earnings_quality", "model77_novel", "fresh_fundamental", "fn_quarterly",
+    "composite_cross_category", "cross_dimension", "news_event_signal",
+    "momentum_price", "momentum_industry", "tech_macd_like", "tech_breakout",
+    "tech_rsi_like", "tech_trend_strength", "tech_bollinger_like",
+    "lev_debt_ratios", "lev_distress", "lev_interest_coverage",
+    "lev_credit_quality_qoq", "event_credit", "event_mna", "event_business",
+    "event_insider", "deriv_fscore_bfl", "deriv_fscore_momentum",
+    "deriv_fscore_composites", "deriv_fscore_x_price", "deriv_rank_composites",
+    "pure_deriv_scores", "analyst_derivative_scores", "analyst_target_price",
+    "analyst_coverage_dispersion", "analyst_revision_breadth",
+    "analyst_recommendations", "quality_earnings_stability",
+    "quality_balance_sheet_quarterly", "quality_cash_earnings",
+    "quality_accruals", "earnings_quality_quarterly",
+    "earnings_surprise_magnitude", "earnings_sue_pead", "earnings_torpedo",
+    "composite_vqm", "composite_adaptive", "composite_adaptive_regime",
+    "composite_risk_adjusted", "risk_systematic_decomp", "risk_idiosyncratic",
+    "risk_bab", "risk_correlation_regime", "gap_beta_mean_reversion",
+    "gap_cash_conversion", "gap_piotroski", "gap_iv_momentum",
+    "gap_corr_regime_shift", "interact_size_x_value_x_quality",
+    "interact_value_x_quality", "interact_value_x_momentum",
+    "interact_momentum_x_quality", "interact_sentiment_x_fundamental",
+    "invest_asset_growth", "invest_net_issuance", "invest_rnd", "invest_capex",
+    "profit_margins", "profit_return_on_capital", "profit_cash_return_quarterly",
+    "profit_gross", "value_book", "value_earnings_yield", "value_dividend",
+    "value_cashflow_yield", "size_microcap_liquidity",
+    "size_conditioned_momentum", "size_conditioned_quality",
+    "sent_news_reaction", "sent_ravenpack", "sent_price_divergence",
+    "sent_level_change", "sent_social_buzz", "sentiment",
+    "liq_amihud", "liq_turnover_reversal", "liq_volume_trend",
+    "liq_volume_price_divergence", "liq_risk_premium",
+    "opt_forward_price", "opt_call_breakeven_ts", "opt_put_breakeven_ts",
+    "opt_call_put_skew", "opt_breakeven_dynamics",
+    "iv_term_structure", "vol_of_vol", "vol_term_structure",
+    "vol_low_vol", "vol_realized_vs_implied",
+    "season_data_release_mr", "season_earnings_calendar",
+    "compound_momentum", "data_quality", "low_turnover",
+    "group_fill_scale", "m77_credit", "m77_profitability",
+    "m77_momentum", "m77_quality", "m77_growth", "m77_value",
+    "m77_vol_risk", "m77_mega_composite",
+    "sc_customer_returns", "sc_network_centrality", "sc_hierarchy_sector",
+    "sc_breadth",
+    "mr_short_term", "mr_long_term", "mr_regression_residual", "mr_vol_gated",
+    "accruals_quality",
+}

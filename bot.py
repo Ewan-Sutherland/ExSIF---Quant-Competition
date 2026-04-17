@@ -141,6 +141,16 @@ class AlphaBot:
         # v6.2.1: Universe sweeper — test eligible alphas on all universes
         self.universe_sweeper = UniverseSweeper(storage, client)
 
+        # v7.2.1: Field gap miner — systematically mines unused fields
+        try:
+            from field_gap_miner import FieldGapMiner
+            self.gap_miner = FieldGapMiner(storage, rng=self.generator.rng)
+            self.gap_miner.refresh()
+            self._gap_refresh_interval = 100  # Re-scan portfolio every 100 completions
+        except Exception as exc:
+            self.gap_miner = None
+            print(f"[GAP_MINER] Not available: {exc}")
+
         # v6.0.1: Warm-start session state from database — persists across restarts & team members
         self._warm_start_from_history()
 
@@ -1447,30 +1457,37 @@ class AlphaBot:
                 else:
                     print(f"  ⚠️ Submit timeout/unknown\n{'='*60}\n")
             else:
-                # AUTO_SUBMIT=False → stage in ready_alphas table
-                self.storage.insert_ready_alpha(
-                    candidate_id=best["candidate_id"],
-                    run_id=best["run_id"],
-                    alpha_id=best["alpha_id"],
-                    expression=expression,
-                    core_signal=core or "",
-                    family=family,
-                    template_id=candidate_row.get("template_id", ""),
-                    sharpe=best["sharpe"],
-                    fitness=best["fitness"],
-                    turnover=metrics.turnover,
-                    score_before=best.get("before"),
-                    score_after=best.get("after"),
-                    score_change=best["change"],
-                    settings_json=best.get("settings_json", "{}"),
-                    variant_desc=best["desc"],
-                )
+                # AUTO_SUBMIT=False → stage ALL positive variants in ready_alphas.
+                # v7.2.1: Don't just stage the best — after it gets submitted,
+                # the portfolio shifts and a +4 variant might become +30.
+                # Stage all of them so they can be re-checked at submission time.
+                for pv in positive:
+                    try:
+                        self.storage.insert_ready_alpha(
+                            candidate_id=pv["candidate_id"],
+                            run_id=pv["run_id"],
+                            alpha_id=pv["alpha_id"],
+                            expression=expression,
+                            core_signal=core or "",
+                            family=family,
+                            template_id=candidate_row.get("template_id", ""),
+                            sharpe=pv["sharpe"],
+                            fitness=pv["fitness"],
+                            turnover=metrics.turnover,
+                            score_before=pv.get("before"),
+                            score_after=pv.get("after"),
+                            score_change=pv["change"],
+                            settings_json=pv.get("settings_json", "{}"),
+                            variant_desc=pv["desc"],
+                        )
+                    except Exception:
+                        pass  # Duplicate alpha_id
                 print(
-                    f"  📋 STAGED in ready_alphas — score change={best['change']:+.0f} "
+                    f"  📋 STAGED {len(positive)} variant(s) in ready_alphas — best score change={best['change']:+.0f} "
                     f"(submit manually on BRAIN website)\n"
                     f"{'='*60}\n"
                 )
-                # v6.2.1: Queue universe sweep for this alpha
+                # v6.2.1: Queue universe sweep for best alpha
                 self.universe_sweeper.queue_sweep(
                     expression=expression,
                     settings=json.loads(best.get("settings_json", "{}")) if isinstance(best.get("settings_json"), str) else best.get("settings_json", {}),
@@ -1485,31 +1502,39 @@ class AlphaBot:
             negative = [v for v in variants if v["change"] is not None and v["change"] < 0]
 
             if unknown:
-                # v7.0: Stage unknowns with 'unverified' status — separate from confirmed positives.
-                # Query ready_alphas WHERE status='ready' for your submit list.
-                # Query ready_alphas WHERE status='unverified' if you want to manually check these.
+                # v7.2.1: Stage ALL unknown variants, not just the best.
+                # Different settings produce different PnL curves with different
+                # portfolio correlations. S=2.25 might score -50 while S=1.88
+                # on a different universe scores +30. The TeammateScoreChecker
+                # will check each one and find the actual portfolio-positive variant.
+                staged_count = 0
+                for unk in unknown:
+                    try:
+                        self.storage.insert_ready_alpha(
+                            candidate_id=unk["candidate_id"],
+                            run_id=unk["run_id"],
+                            alpha_id=unk["alpha_id"],
+                            expression=expression,
+                            core_signal=core or "",
+                            family=family,
+                            template_id=candidate_row.get("template_id", ""),
+                            sharpe=unk["sharpe"],
+                            fitness=unk["fitness"],
+                            turnover=metrics.turnover,
+                            score_before=None,
+                            score_after=None,
+                            score_change=None,
+                            settings_json=unk.get("settings_json", "{}"),
+                            variant_desc=unk["desc"] + " (unverified)",
+                            status="unverified",
+                        )
+                        staged_count += 1
+                    except Exception:
+                        pass  # Duplicate alpha_id — already staged from a previous run
                 best_unk = max(unknown, key=lambda v: v["sharpe"])
-                self.storage.insert_ready_alpha(
-                    candidate_id=best_unk["candidate_id"],
-                    run_id=best_unk["run_id"],
-                    alpha_id=best_unk["alpha_id"],
-                    expression=expression,
-                    core_signal=core or "",
-                    family=family,
-                    template_id=candidate_row.get("template_id", ""),
-                    sharpe=best_unk["sharpe"],
-                    fitness=best_unk["fitness"],
-                    turnover=metrics.turnover,
-                    score_before=None,
-                    score_after=None,
-                    score_change=None,
-                    settings_json=best_unk.get("settings_json", "{}"),
-                    variant_desc=best_unk["desc"] + " (unverified)",
-                    status="unverified",
-                )
                 print(
-                    f"\n  ⚠️ Before-after unavailable after retries for {len(unknown)} variant(s). "
-                    f"Staged as 'unverified' (best S={best_unk['sharpe']:.2f} F={best_unk['fitness']:.2f}).\n"
+                    f"\n  ⚠️ Before-after unavailable — staged {staged_count} of {len(unknown)} variant(s) "
+                    f"as 'unverified' (best S={best_unk['sharpe']:.2f} F={best_unk['fitness']:.2f}).\n"
                     f"{'='*60}\n"
                 )
             elif negative:
@@ -1944,6 +1969,12 @@ class AlphaBot:
                 if family not in {"momentum", "fundamental"}:
                     weight *= diversity_boost
 
+            # v7.2.1: Sprint mode — crush dead families to near-zero
+            if getattr(config, "SPRINT_MODE", False):
+                dead_families = getattr(config, "DEAD_FAMILIES", set())
+                if family in dead_families:
+                    weight = getattr(config, "DEAD_FAMILY_WEIGHT", 0.01)
+
             bias[family] = weight
 
         # v7.0: Blend with team weights (teammates' learned data)
@@ -2210,6 +2241,28 @@ class AlphaBot:
         ):
             self.evolver.refresh_population()
 
+        # v7.2.1: Periodically refresh gap miner (portfolio changes after submissions)
+        if (
+            self.gap_miner is not None
+            and self.completed_runs > 0
+            and self.completed_runs % self._gap_refresh_interval == 0
+        ):
+            self.gap_miner.refresh()
+
+        # v7.2.1: FIELD GAP MINING — primary generation method in sprint mode.
+        # 65% of fresh candidates use unused fields in proven patterns.
+        # This is the highest-leverage path: every positive-scoring alpha
+        # used a field NOT in the portfolio.
+        gap_prob = getattr(config, "GAP_MINING_PROBABILITY", 0.0)
+        if (
+            self.gap_miner is not None
+            and self.gap_miner.gap_count > 0
+            and self.generator.rng.random() < gap_prob
+        ):
+            candidate = self._gap_candidate(settings_bias)
+            if candidate is not None:
+                return candidate
+
         # v6.1: Try signal combination some of the time (10%)
         combo_prob = getattr(config, "COMBO_GENERATION_PROBABILITY", 0.10)
         if (
@@ -2467,6 +2520,43 @@ class AlphaBot:
         print(
             f"[EVOLVE_CANDIDATE] family={candidate.family} "
             f"template={candidate.template_id} expr={candidate.expression}"
+        )
+        return candidate
+
+    def _gap_candidate(self, settings_bias=None):
+        """
+        v7.2.1: Generate a candidate using the field-gap miner.
+        Picks an unused field and plugs it into a proven expression pattern.
+        """
+        result = self.gap_miner.generate()
+        if result is None:
+            return None
+
+        expr = result["expression"]
+
+        try:
+            candidate = self.generator.create_from_expression(
+                expr, settings_bias=settings_bias,
+            )
+        except Exception as exc:
+            print(f"[GAP_CANDIDATE_ERROR] expr={expr[:80]} error={exc}")
+            return None
+
+        if self.storage.candidate_exists(candidate.expression_hash):
+            return None  # Silent skip — gap miner will rotate to next field
+
+        if candidate.canonical_expression in self.concentrated_weight_exprs:
+            return None
+
+        # Override family/template to track gap mining performance
+        candidate.family = result["family"]
+        candidate.template_id = result["template_id"]
+        candidate.fields = result["fields"]
+
+        print(
+            f"[GAP_MINING] field={result['params'].get('gap_field', '?')} "
+            f"pattern={result['params'].get('pattern', '?')} "
+            f"expr={candidate.expression[:90]}"
         )
         return candidate
 
