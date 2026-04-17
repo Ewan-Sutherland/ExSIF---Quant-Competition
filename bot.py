@@ -1092,7 +1092,12 @@ class AlphaBot:
             return
 
         if check["_passed"] is False:
-            if core:
+            corr_val = check.get("_self_correlation") or 1.0
+            if core and corr_val >= 0.75:
+                # v7.2.1: Only hard-block strong correlations. Cores at 0.70-0.75
+                # might pass with different settings (universe/neutralization shift
+                # the PnL curve enough to drop correlation below 0.70). The epoch
+                # saturation penalty already handles the family-level dampening.
                 self.rejected_cores.add(core)
             # v7.2.1: Tell the generator this family just bounced off the
             # saturation wall — it'll down-weight the family for the rest
