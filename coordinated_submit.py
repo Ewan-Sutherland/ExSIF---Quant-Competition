@@ -315,6 +315,10 @@ class CoordinatedSubmitPipeline:
 
             if success:
                 submitted += 1
+                # v7.2.1: Advance owner rotation so next ties prefer a different bot
+                if not hasattr(self, "_owner_rotation_idx"):
+                    self._owner_rotation_idx = 0
+                self._owner_rotation_idx = (self._owner_rotation_idx + 1) % len(self.participating_owners)
             else:
                 rejected += 1
                 try:
@@ -447,7 +451,15 @@ class CoordinatedSubmitPipeline:
     # ── Helpers ───────────────────────────────────────────────────
 
     def _read_all_positive(self) -> list[dict]:
-        """Read all positive ready_alphas across participating owners, sorted by score."""
+        """Read all positive ready_alphas across participating owners, sorted by rank.
+
+        Ranking order (all DESC except noted):
+          1. score_change    — highest portfolio impact first
+          2. fitness         — more robust to future portfolio shifts
+          3. sharpe ASC      — lower Sharpe = more unique PnL curve,
+                               less likely to block future alphas via self-corr
+        Tie on all three: stable sort falls back to Supabase's return order.
+        """
         all_positive = []
         for owner in self.participating_owners:
             try:
@@ -463,7 +475,15 @@ class CoordinatedSubmitPipeline:
                     all_positive.append(r)
             except Exception as exc:
                 print(f"    ERROR reading {owner}: {exc}")
-        all_positive.sort(key=lambda x: x.get("score_change", 0), reverse=True)
+
+        def sort_key(x):
+            return (
+                -round(x.get("score_change") or 0, 0),   # higher score first (round to tier)
+                -round(x.get("fitness") or 0, 2),        # higher fitness first
+                round(x.get("sharpe") or 0, 2),          # lower sharpe first
+            )
+
+        all_positive.sort(key=sort_key)
         return all_positive
 
     def _submit_alpha(self, alpha: dict) -> bool:
