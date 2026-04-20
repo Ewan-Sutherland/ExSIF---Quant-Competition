@@ -75,11 +75,23 @@ GAP_PATTERNS = [
 ]
 
 # Fields that need ts_backfill() wrapping (sparse/event data)
+# NOTE: pv13_ fields REMOVED — they have Unit[Group:] type and crash ts_backfill
 SPARSE_FIELD_PREFIXES = (
-    'rp_css_', 'rp_ess_', 'rp_nip_', 'pv13_', 'nws12_', 'nws18_',
+    'rp_css_', 'rp_ess_', 'rp_nip_', 'nws12_', 'nws18_',
     'scl12_', 'scl15_', 'snt_', 'snt1_',
     'implied_volatility_', 'historical_volatility_', 'pcr_',
     'news_', 'rel_ret_',
+)
+
+# v7.2.1: Group-typed fields that only work with group_* operators.
+# These fields have Unit[Group:N] type and FAIL with ts_backfill, ts_rank,
+# divide-by-cap, or most scalar operators. Skip entirely for now.
+GROUP_TYPED_PREFIXES = (
+    'pv13_',              # supply chain hierarchy — Unit[Group:N]
+    'fnd6_newqeventv',    # quarterly event fundamentals — "event inputs" errors
+    'fnd6_eventv',        # event-type fundamentals
+    'fnd6_newa',          # annual grouped fundamentals
+    'fnd2_',              # fundamental grouped variant
 )
 
 # Fields that are ratios (don't divide by cap)
@@ -293,6 +305,7 @@ class FieldGapMiner:
             gap = [f for f in fields if f.lower() not in self._portfolio_fields
                    and f.lower() not in {'industry', 'subindustry', 'sector', 'market'}
                    and not any(f.lower().startswith(p) for p in economically_saturated_prefixes)
+                   and not any(f.lower().startswith(p) for p in GROUP_TYPED_PREFIXES)
                    and not any(m in f.lower() for m in METADATA_PATTERNS)]
             if gap:
                 self._gap_by_category[category] = gap
@@ -305,6 +318,7 @@ class FieldGapMiner:
             gap = [f for f in fields if f.lower() not in self._portfolio_fields
                    and f.lower() not in {'industry', 'subindustry', 'sector', 'market'}
                    and not any(f.lower().startswith(p) for p in economically_saturated_prefixes)
+                   and not any(f.lower().startswith(p) for p in GROUP_TYPED_PREFIXES)
                    and not any(m in f.lower() for m in METADATA_PATTERNS)]
             if gap:
                 self._gap_by_category[category] = gap

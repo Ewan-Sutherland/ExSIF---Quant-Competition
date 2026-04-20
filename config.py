@@ -118,12 +118,12 @@ AUTO_SUBMIT = False
 # The pipeline re-checks all scores, groups by core signal, submits greedily.
 # Set your schedule here or let it auto-assign based on alphabetical order.
 SUBMIT_SCHEDULE = {
-    "ewansutherland@icloud.com": [7, 19],   # 7:30am and 7:30pm UTC (coordinated)
-    "gmpc201@exeter.ac.uk": [7, 19],         # 7:30am and 7:30pm UTC (coordinated)
-    "tns203@exeter.ac.uk": [7, 19],           # 7:30am and 7:30pm UTC
-    "lucacroci2005@gmail.com": [7, 19],       # 7:30am and 7:30pm UTC
+    "ewansutherland@icloud.com": [9, 19],   # 12:25am and 12:25pm UTC (coordinated)
+    "gmpc201@exeter.ac.uk": [9, 19],         # 12:25am and 12:25pm UTC (coordinated)
+    "tns203@exeter.ac.uk": [9, 19],           # 12:25am and 12:25pm UTC
+    "lucacroci2005@gmail.com": [9, 19],       # 12:25am and 12:25pm UTC
 }
-SUBMIT_MINUTE = 30  # Fire at :30 past the hour
+SUBMIT_MINUTE = 10  # Fire at :25 past the hour
 # Minimum score change to auto-submit (avoids marginal alphas flipping negative)
 SUBMIT_MIN_SCORE = 15  # v7.2.1: Lowered from 20 — low-positive alphas stay in ready_alphas and can grow after other submissions shift the portfolio
 
@@ -553,7 +553,7 @@ PROXY_SCORE_OWNERS = [
 ]
 # Only the coordinator ranks globally and orchestrates
 IS_COORDINATOR = True  # Ewan's config = True, team config = False
-MAX_SUBMISSIONS_PER_WINDOW = 15
+MAX_SUBMISSIONS_PER_WINDOW = 200
 
 # ═══════════════════════════════════════════════════════════════
 # v7.2.1: SPRINT MODE CONFIG

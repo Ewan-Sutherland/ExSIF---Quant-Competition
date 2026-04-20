@@ -41,7 +41,9 @@ def _recent_cutoff() -> str:
 class CoordinatedSubmitPipeline:
     """Runs on EVERY participating bot (Ewan + Griff)."""
 
-    WAIT_TIMEOUT = 180   # 3 minutes max wait for other bot
+    WAIT_TIMEOUT = 7200  # 2 hours max wait for other bots. Phase 1b sharding
+                         # over large proxy pools (100+ alphas) can take 40+ min
+                         # on the slowest shard — coordinator needs to wait patiently.
     POLL_INTERVAL = 5    # seconds between polls
 
     def __init__(self, storage, client, config_mod):
@@ -52,17 +54,29 @@ class CoordinatedSubmitPipeline:
         self.window_id = _window_id()
         self.is_coordinator = getattr(config_mod, "IS_COORDINATOR", False)
         self.participating_owners = getattr(config_mod, "COORDINATED_SUBMIT_OWNERS", [])
+        # v7.2.1: Timestamp when this pipeline invocation started.
+        # Used to filter out signals from PREVIOUS runs in the same 6-hour window.
+        # Supabase window_id is a 6-hour block, so an earlier run (e.g. 18:30)
+        # and a later run (e.g. 22:50) share the same window_id but are logically
+        # separate cycles. Without this filter, old scores_ready/submit_command
+        # signals would be matched against the current run, causing false "ready"
+        # states and missed commands. We subtract 10 min as buffer for clock skew
+        # between bots (each bot has its own run_started_at).
+        from datetime import datetime, timezone, timedelta
+        self.run_started_at = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
 
     # ── Signals ──────────────────────────────────────────────────
 
     def _send_signal(self, signal: str, target_owner: str = None,
                      alpha_id: str = None, round_num: int = 0, payload: dict = None):
-        """Write a coordination signal to Supabase."""
+        """Write a coordination signal to Supabase. Logs failures prominently —
+        _post returns None on HTTP errors rather than raising, so check the return.
+        """
         if payload is None:
             payload = {}
         payload["round_num"] = round_num
         try:
-            self.storage._post("team_submit_signals", {
+            result = self.storage._post("team_submit_signals", {
                 "window_id": self.window_id,
                 "owner": self.owner,
                 "signal": signal,
@@ -70,22 +84,28 @@ class CoordinatedSubmitPipeline:
                 "alpha_id": alpha_id,
                 "payload": json.dumps(payload),
             })
+            if result is None:
+                print(f"  [SIGNAL] ⚠️ send returned None ({signal} → {target_owner or 'all'}) — "
+                      f"check team_submit_signals table exists in Supabase")
         except Exception as exc:
             print(f"  [SIGNAL] send failed ({signal}): {exc}")
 
     def _wait_for_signal(self, signal: str, from_owner: str = None,
                          target_owner: str = None, round_num: int = None,
                          timeout: int = None) -> dict | None:
-        """Poll for a specific signal. Returns signal row or None on timeout."""
+        """Poll for a specific signal. Returns signal row or None on timeout.
+
+        Uses self.run_started_at as the cutoff so we only see signals from
+        THIS pipeline invocation, not previous runs in the same 6-hour window.
+        """
         timeout = timeout or self.WAIT_TIMEOUT
         deadline = time.time() + timeout
-        cutoff = _recent_cutoff()
 
         while time.time() < deadline:
             params = {
                 "window_id": f"eq.{self.window_id}",
                 "signal": f"eq.{signal}",
-                "created_at": f"gte.{cutoff}",
+                "created_at": f"gte.{self.run_started_at}",
                 "order": "created_at.desc",
                 "limit": 10,
             }
@@ -206,14 +226,14 @@ class CoordinatedSubmitPipeline:
         print(f"{'='*60}\n")
 
         # v7.2.1: Proxy score owners (Luca) can't check own scores —
-        # skip Phase 1 and go straight to participant mode.
+        # skip Phase 1 and go straight to a simple wait-for-done loop.
         proxy_owners = getattr(self.config, "PROXY_SCORE_OWNERS", [])
         if self.owner in proxy_owners:
             print("  ── Proxy mode: scores will be checked by coordinator ──")
             self._send_signal("scores_ready", payload={
                 "count": 0, "positive": 0, "proxy": True,
             })
-            return self._run_participant()
+            return self._run_proxy_wait()
 
         # Phase 1: Check own scores
         print("  ── Phase 1: Checking own scores ──")
@@ -221,7 +241,20 @@ class CoordinatedSubmitPipeline:
         positive = [a for a in alphas if a.get("live_score") is not None and a["live_score"] > 0]
         print(f"\n  Own results: {len(positive)} positive out of {len(alphas)}\n")
 
-        # Signal scores ready
+        # v7.2.1: Phase 1b — each checker bot takes a shard of the proxy owner's alphas
+        # Parallelizes what was previously sequential on the coordinator.
+        # Ewan's 63-alpha re-sim took 2.5 hours; sharded across 3 bots = ~50 min each.
+        # Shards assigned by hash(alpha_id) % N so each alpha is checked by exactly one bot.
+        checker_owners = [o for o in self.participating_owners if o not in proxy_owners]
+        if self.owner in checker_owners and proxy_owners:
+            my_shard_idx = checker_owners.index(self.owner)
+            num_shards = len(checker_owners)
+            for proxy in proxy_owners:
+                if proxy in self.participating_owners:
+                    print(f"\n  ── Phase 1b: Proxy shard {my_shard_idx + 1}/{num_shards} for {proxy} ──")
+                    self._check_proxy_scores_sharded(proxy, my_shard_idx, num_shards)
+
+        # Signal scores ready (after proxy sharding — so Phase 2 won't start until all proxy work done)
         self._send_signal("scores_ready", payload={
             "count": len(alphas),
             "positive": len(positive),
@@ -253,13 +286,10 @@ class CoordinatedSubmitPipeline:
             else:
                 print(f"    ⚠️ {other}: timed out — proceeding without")
 
-        # v7.2.1: Check proxy owners' scores using coordinator's credentials
-        # This replaces the old TeammateScoreChecker — integrated into the pipeline
-        # so proxy alphas participate in global ranking and recheck loop.
-        for proxy in proxy_owners:
-            if proxy in [o for o in self.participating_owners]:
-                print(f"\n  ── Checking scores for proxy: {proxy} ──")
-                self._check_proxy_scores(proxy)
+        # v7.2.1: Proxy scores already checked during Phase 1b sharding
+        # (each checker bot handled its shard in parallel). Just proceed.
+        # Keep the per-round recheck loop below — it still updates the scores
+        # after each submission shifts the portfolio.
 
         # Small delay to ensure DB writes have propagated
         time.sleep(3)
@@ -315,10 +345,6 @@ class CoordinatedSubmitPipeline:
 
             if success:
                 submitted += 1
-                # v7.2.1: Advance owner rotation so next ties prefer a different bot
-                if not hasattr(self, "_owner_rotation_idx"):
-                    self._owner_rotation_idx = 0
-                self._owner_rotation_idx = (self._owner_rotation_idx + 1) % len(self.participating_owners)
             else:
                 rejected += 1
                 try:
@@ -336,10 +362,12 @@ class CoordinatedSubmitPipeline:
                 if proxy in [o for o in self.participating_owners]:
                     self._recheck_proxy_scores(proxy)
 
-            # Wait for other bots to finish rechecking
+            # Wait for other bots to finish rechecking.
+            # _recheck_own_positive takes ~2s/alpha × ~20 alphas = ~40-60s per bot,
+            # so 180s gives comfortable margin even with slow API.
             for other in other_owners:
                 self._wait_for_signal("recheck_done", from_owner=other,
-                                      round_num=round_num, timeout=45)
+                                      round_num=round_num, timeout=180)
             time.sleep(2)
 
         # Signal done so participants stop waiting
@@ -354,96 +382,169 @@ class CoordinatedSubmitPipeline:
 
     # ── Participant ──────────────────────────────────────────────
 
-    def _run_participant(self) -> dict:
-        """Wait for coordinator commands, submit when told."""
-        print("  ── Waiting for coordinator ──")
+    def _run_proxy_wait(self) -> dict:
+        """Dead-simple wait loop for proxy owners (Luca).
 
+        Waits until coordinator sends 'done'. No round counter, no deadlines,
+        no silence detection. Just polls for submit_command / recheck / done
+        and reacts as things arrive. Keeps Luca's bot blocked in the tick
+        loop until the submission window is officially closed.
+
+        User monitors externally for stalls.
+        """
         submitted = 0
         rejected = 0
-        max_rounds = getattr(self.config, "MAX_SUBMISSIONS_PER_WINDOW", 15)
+        seen_submit_cmds = set()   # alpha_ids we've already submitted
+        seen_rechecks = set()      # round_nums we've already ack'd
 
-        for round_num in range(1, max_rounds + 1):
-            # Poll for: submit_command for this round, recheck for this round, or done
-            deadline = time.time() + 180
-            got_command = None
-            got_done = False
+        print("  ── Waiting for coordinator (no timeout) ──")
 
-            while time.time() < deadline:
-                # Check for done
-                done_sig = self._wait_for_signal("done", timeout=1)
-                if done_sig:
-                    got_done = True
-                    break
-
-                # Check for submit command for THIS round (round_num prevents replay)
-                cmd_sig = self._wait_for_signal("submit_command",
-                                                 target_owner=self.owner,
-                                                 round_num=round_num,
-                                                 timeout=1)
-                if cmd_sig:
-                    got_command = cmd_sig
-                    break
-
-                # Check for recheck (coordinator submitted its own alpha)
-                recheck_sig = self._wait_for_signal("recheck", round_num=round_num, timeout=1)
-                if recheck_sig:
-                    print(f"  Round {round_num}: coordinator submitted — re-checking scores...")
-                    self._recheck_own_positive()
-                    self._send_signal("recheck_done", round_num=round_num)
-                    # Move to next round — coordinator will send next command with round_num+1
-                    break
-
-                time.sleep(self.POLL_INTERVAL)
-
-            if got_done:
-                print(f"  Coordinator finished — done")
+        while True:
+            # Check for done — coordinator explicitly said to stop
+            done_sig = self._wait_for_signal("done", timeout=1)
+            if done_sig:
+                print("  Coordinator finished — done")
                 break
 
-            if got_command:
-                # Process submit command
-                alpha_id = got_command.get("alpha_id")
-                payload = json.loads(got_command.get("payload", "{}")) if got_command.get("payload") else {}
-                print(f"\n  📩 Round {round_num}: submit alpha_id={alpha_id[:12]}... "
-                      f"(score={payload.get('score', '?')})")
+            # Check for submit command (any round_num, filtered by alpha_id we haven't done)
+            cmd_sig = self._wait_for_signal("submit_command",
+                                             target_owner=self.owner,
+                                             timeout=1)
+            if cmd_sig:
+                alpha_id = cmd_sig.get("alpha_id")
+                if alpha_id and alpha_id not in seen_submit_cmds:
+                    seen_submit_cmds.add(alpha_id)
+                    payload = json.loads(cmd_sig.get("payload", "{}")) if cmd_sig.get("payload") else {}
+                    round_num = payload.get("round_num", 0)
+                    print(f"\n  📩 Round {round_num}: submit alpha_id={alpha_id[:12]}... "
+                          f"(score={payload.get('score', '?')})")
 
-                # Find the alpha
-                try:
-                    rows = self.storage._get("ready_alphas", {
-                        "owner": f"eq.{self.owner}",
-                        "alpha_id": f"eq.{alpha_id}",
-                    }) or []
-                except Exception:
-                    rows = []
+                    # Find the alpha
+                    try:
+                        rows = self.storage._get("ready_alphas", {
+                            "owner": f"eq.{self.owner}",
+                            "alpha_id": f"eq.{alpha_id}",
+                        }) or []
+                    except Exception:
+                        rows = []
 
-                if not rows:
-                    print(f"  ⚠️ Alpha not found — skipping")
-                    self._send_signal("submitted", round_num=round_num,
-                                      payload={"accepted": False, "reason": "not_found"})
-                    rejected += 1
-                else:
-                    alpha = rows[0]
-                    success = self._submit_alpha(alpha)
-
-                    if success:
-                        submitted += 1
+                    if not rows:
+                        print(f"  ⚠️ Alpha not found — skipping")
                         self._send_signal("submitted", round_num=round_num,
-                                          payload={"accepted": True, "alpha_id": alpha_id})
-                    else:
+                                          payload={"accepted": False, "reason": "not_found"})
                         rejected += 1
-                        self._send_signal("submitted", round_num=round_num,
-                                          payload={"accepted": False, "alpha_id": alpha_id,
-                                                   "reason": "rejected"})
-                        try:
-                            self.storage._patch("ready_alphas", {"id": alpha["id"]}, {"status": "rejected"})
-                        except Exception:
-                            pass
+                    else:
+                        alpha = rows[0]
+                        success = self._submit_alpha(alpha)
+                        if success:
+                            submitted += 1
+                            self._send_signal("submitted", round_num=round_num,
+                                              payload={"accepted": True, "alpha_id": alpha_id})
+                        else:
+                            rejected += 1
+                            self._send_signal("submitted", round_num=round_num,
+                                              payload={"accepted": False, "alpha_id": alpha_id,
+                                                       "reason": "rejected"})
+                            try:
+                                self.storage._patch("ready_alphas", {"id": alpha["id"]},
+                                                    {"status": "rejected"})
+                            except Exception:
+                                pass
+                    # fall through to keep polling
 
-                # Wait for recheck
-                recheck_sig = self._wait_for_signal("recheck", round_num=round_num, timeout=30)
-                if recheck_sig:
-                    print(f"  Re-checking own scores...")
+            # Check for recheck (coordinator submitted something, tell us to re-check)
+            # For proxy owners, coordinator handles the actual re-check; we just ack.
+            recheck_sig = self._wait_for_signal("recheck", timeout=1)
+            if recheck_sig:
+                payload = json.loads(recheck_sig.get("payload", "{}")) if recheck_sig.get("payload") else {}
+                round_num = payload.get("round_num", 0)
+                if round_num and round_num not in seen_rechecks:
+                    seen_rechecks.add(round_num)
+                    self._send_signal("recheck_done", round_num=round_num)
+
+            time.sleep(self.POLL_INTERVAL)
+
+        print(f"\n  Proxy wait done: submitted={submitted} rejected={rejected}")
+        return {"submitted": submitted, "rejected": rejected}
+
+    def _run_participant(self) -> dict:
+        """Wait for coordinator commands, submit when told. No internal timeouts —
+        loop blocks until coordinator sends 'done'. Same pattern as proxy wait but
+        also runs _recheck_own_positive() on recheck signals so Griff/Tom keep
+        their own alpha scores fresh after each submission shifts the portfolio.
+
+        User monitors externally for stalls.
+        """
+        submitted = 0
+        rejected = 0
+        seen_submit_cmds = set()   # alpha_ids already processed
+        seen_rechecks = set()      # round_nums already acknowledged
+
+        print("  ── Waiting for coordinator (no timeout) ──")
+
+        while True:
+            # Check for done
+            done_sig = self._wait_for_signal("done", timeout=1)
+            if done_sig:
+                print("  Coordinator finished — done")
+                break
+
+            # Check for submit command targeted at us (any round)
+            cmd_sig = self._wait_for_signal("submit_command",
+                                             target_owner=self.owner,
+                                             timeout=1)
+            if cmd_sig:
+                alpha_id = cmd_sig.get("alpha_id")
+                if alpha_id and alpha_id not in seen_submit_cmds:
+                    seen_submit_cmds.add(alpha_id)
+                    payload = json.loads(cmd_sig.get("payload", "{}")) if cmd_sig.get("payload") else {}
+                    round_num = payload.get("round_num", 0)
+                    print(f"\n  📩 Round {round_num}: submit alpha_id={alpha_id[:12]}... "
+                          f"(score={payload.get('score', '?')})")
+
+                    try:
+                        rows = self.storage._get("ready_alphas", {
+                            "owner": f"eq.{self.owner}",
+                            "alpha_id": f"eq.{alpha_id}",
+                        }) or []
+                    except Exception:
+                        rows = []
+
+                    if not rows:
+                        print(f"  ⚠️ Alpha not found — skipping")
+                        self._send_signal("submitted", round_num=round_num,
+                                          payload={"accepted": False, "reason": "not_found"})
+                        rejected += 1
+                    else:
+                        alpha = rows[0]
+                        success = self._submit_alpha(alpha)
+                        if success:
+                            submitted += 1
+                            self._send_signal("submitted", round_num=round_num,
+                                              payload={"accepted": True, "alpha_id": alpha_id})
+                        else:
+                            rejected += 1
+                            self._send_signal("submitted", round_num=round_num,
+                                              payload={"accepted": False, "alpha_id": alpha_id,
+                                                       "reason": "rejected"})
+                            try:
+                                self.storage._patch("ready_alphas", {"id": alpha["id"]},
+                                                    {"status": "rejected"})
+                            except Exception:
+                                pass
+
+            # Check for recheck — refresh our own alpha scores
+            recheck_sig = self._wait_for_signal("recheck", timeout=1)
+            if recheck_sig:
+                payload = json.loads(recheck_sig.get("payload", "{}")) if recheck_sig.get("payload") else {}
+                round_num = payload.get("round_num", 0)
+                if round_num and round_num not in seen_rechecks:
+                    seen_rechecks.add(round_num)
+                    print(f"  Round {round_num}: coordinator submitted — re-checking own scores...")
                     self._recheck_own_positive()
                     self._send_signal("recheck_done", round_num=round_num)
+
+            time.sleep(self.POLL_INTERVAL)
 
         print(f"\n  Participant done: submitted={submitted} rejected={rejected}")
         return {"submitted": submitted, "rejected": rejected}
@@ -560,6 +661,170 @@ class CoordinatedSubmitPipeline:
                           f"S={a.get('sharpe',0):.2f} → {direction}{score:.0f}")
             except Exception:
                 pass
+            time.sleep(2)
+
+    def _check_proxy_scores_sharded(self, proxy_owner: str, shard_idx: int, num_shards: int) -> None:
+        """Check scores for proxy owner's alphas — but only for this bot's shard.
+
+        Sharding by hash(alpha_id) % num_shards ensures each alpha is checked
+        by exactly one bot. All bots run in parallel during Phase 1b, splitting
+        the total re-sim work ~N-way.
+
+        Results written to ready_alphas (keeping proxy_owner as owner).
+        Also records the coordinator alpha_id → original alpha_id mapping via
+        a note field so any bot can re-check later using that.
+        """
+        try:
+            alphas = self.storage._get("ready_alphas", {
+                "owner": f"eq.{proxy_owner}",
+                "status": "in.(ready,unverified)",
+                "select": "*",
+                "order": "sharpe.desc",
+            }) or []
+        except Exception as exc:
+            print(f"    ERROR loading {proxy_owner} alphas: {exc}")
+            return
+
+        if not alphas:
+            print(f"    No ready/unverified alphas for {proxy_owner}")
+            return
+
+        # Filter to just this bot's shard. Use hashlib.md5 for a STABLE hash —
+        # Python's built-in hash() is randomized per-process, so each bot would
+        # get different shard assignments and alphas would be checked 0× or 2×.
+        import hashlib
+        def stable_shard(alpha_id: str) -> int:
+            if not alpha_id:
+                return 0
+            return int(hashlib.md5(alpha_id.encode()).hexdigest(), 16) % num_shards
+        my_alphas = [a for a in alphas if stable_shard(a.get("alpha_id", "")) == shard_idx]
+        print(f"    Shard {shard_idx + 1}/{num_shards}: {len(my_alphas)} of {len(alphas)} alphas")
+
+        # Track coordinator alpha_ids for rechecks later (in-memory this session)
+        if not hasattr(self, "_proxy_alpha_map"):
+            self._proxy_alpha_map = {}
+
+        # v7.2.1: Process 2 alphas concurrently per bot for speed.
+        # Each bot has 3 sim slots — using 2 leaves 1 free for safety.
+        # Sharded across 3 bots × 2 concurrent = 6x speedup vs the original sequential approach.
+        BATCH = 2
+        idx = 0
+        while idx < len(my_alphas):
+            batch = my_alphas[idx:idx + BATCH]
+            idx += BATCH
+
+            # Step 1: Submit all sims in this batch
+            in_flight = []  # (alpha, sim_id)
+            for a in batch:
+                expr = a.get("expression", "")
+                settings_raw = a.get("settings_json", "{}")
+                if not expr:
+                    continue
+                if isinstance(settings_raw, str):
+                    try:
+                        settings = json.loads(settings_raw)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                else:
+                    settings = settings_raw or {}
+                if not settings:
+                    continue
+
+                try:
+                    sim_id = self.client.submit_simulation(expr, settings)
+                    in_flight.append((a, sim_id))
+                except Exception as exc:
+                    if "429" in str(exc) or "CONCURRENT" in str(exc).upper():
+                        time.sleep(10)
+                        try:
+                            sim_id = self.client.submit_simulation(expr, settings)
+                            in_flight.append((a, sim_id))
+                        except Exception:
+                            continue
+
+            if not in_flight:
+                continue
+
+            # Step 2: Poll all sims in batch until complete
+            results = {}  # sim_id → result
+            deadline = time.time() + 300  # 5 min per batch
+            while len(results) < len(in_flight) and time.time() < deadline:
+                for a, sid in in_flight:
+                    if sid in results:
+                        continue
+                    try:
+                        r = self.client.poll_simulation(sid)
+                        if r.get("status") in ("completed", "failed", "timed_out"):
+                            results[sid] = r
+                    except Exception:
+                        pass
+                if len(results) < len(in_flight):
+                    time.sleep(5)
+
+            # Step 3: For each result, check before-after score
+            for batch_idx, (a, sid) in enumerate(in_flight):
+                global_i = idx - len(batch) + batch_idx
+
+                if sid not in results or results[sid].get("status") != "completed":
+                    print(f"    [{global_i+1}/{len(my_alphas)}] ⏳ {a.get('family','')} "
+                          f"S={a.get('sharpe',0):.2f} — sim timeout")
+                    continue
+
+                # Get this bot's alpha_id from the re-sim
+                check_alpha_id = None
+                try:
+                    raw = results[sid].get("alpha_id", "")
+                    if raw:
+                        check_alpha_id = str(raw).rstrip("/").split("/")[-1]
+                except Exception:
+                    pass
+
+                if not check_alpha_id:
+                    continue
+
+                # Store mapping
+                proxy_alpha_id = a.get("alpha_id", "")
+                if proxy_alpha_id:
+                    self._proxy_alpha_map[proxy_alpha_id] = check_alpha_id
+
+                # Check before-after score
+                score = None
+                for attempt in range(2):
+                    try:
+                        perf = self.client.check_before_after_performance(
+                            check_alpha_id, competition_id=self.config.IQC_COMPETITION_ID,
+                        )
+                        score = perf.get("_score_change")
+                        if score is not None:
+                            break
+                    except Exception:
+                        pass
+                    if attempt < 1:
+                        time.sleep(3)
+
+                if score is not None:
+                    direction = "📈" if score > 0 else "📉" if score < 0 else "➡️"
+                    print(f"    [{global_i+1}/{len(my_alphas)}] {direction} {a.get('family','')} "
+                          f"S={a.get('sharpe',0):.2f} → {score:+.0f}")
+                    # Write core data (score + status) first — MUST succeed.
+                    # check_alpha_id column may not exist, so patch it separately.
+                    self.storage._patch("ready_alphas", {"id": a["id"]}, {
+                        "score_change": score,
+                        "status": "ready" if score >= -10 else "rejected",
+                    })
+                    # Separately try to persist check_alpha_id for cross-shard rechecks.
+                    # If column doesn't exist, _patch returns None silently — rechecks
+                    # then fall back to the in-memory _proxy_alpha_map.
+                    try:
+                        self.storage._patch("ready_alphas", {"id": a["id"]}, {
+                            "check_alpha_id": check_alpha_id,
+                        })
+                    except Exception:
+                        pass
+                else:
+                    print(f"    [{global_i+1}/{len(my_alphas)}] ❓ {a.get('family','')} "
+                          f"S={a.get('sharpe',0):.2f} → score unavailable")
+
             time.sleep(2)
 
     def _check_proxy_scores(self, proxy_owner: str) -> None:
@@ -687,10 +952,15 @@ class CoordinatedSubmitPipeline:
             time.sleep(2)
 
     def _recheck_proxy_scores(self, proxy_owner: str) -> None:
-        """Quick re-check of proxy owner's positive alphas using cached coordinator alpha_ids."""
+        """Quick re-check of proxy owner's positive alphas.
+
+        Uses check_alpha_id (persisted by any bot's shard in Phase 1b) so the
+        coordinator can recheck ALL sharded alphas — not just the ones from
+        its own shard. Falls back to in-memory _proxy_alpha_map if column missing.
+
+        Only rechecks status='ready' alphas (score >= -10). Rejected alphas stay rejected.
+        """
         proxy_map = getattr(self, "_proxy_alpha_map", {})
-        if not proxy_map:
-            return
 
         try:
             rows = self.storage._get("ready_alphas", {
@@ -702,13 +972,16 @@ class CoordinatedSubmitPipeline:
             return
 
         for a in rows:
-            proxy_alpha_id = a.get("alpha_id", "")
-            coord_alpha_id = proxy_map.get(proxy_alpha_id)
-            if not coord_alpha_id:
+            # Prefer persisted check_alpha_id from DB (works across all bots' shards)
+            check_alpha_id = a.get("check_alpha_id")
+            if not check_alpha_id:
+                # Fallback: in-memory map (only has this coordinator's shard)
+                check_alpha_id = proxy_map.get(a.get("alpha_id", ""))
+            if not check_alpha_id:
                 continue
             try:
                 perf = self.client.check_before_after_performance(
-                    coord_alpha_id, competition_id=self.config.IQC_COMPETITION_ID,
+                    check_alpha_id, competition_id=self.config.IQC_COMPETITION_ID,
                 )
                 score = perf.get("_score_change")
                 if score is not None:
