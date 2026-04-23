@@ -418,10 +418,14 @@ def get_fresh_fundamental_fields() -> list[str]:
 
 
 def get_fresh_fn_fields() -> list[str]:
-    """fn_financial fields NOT in submissions (317 of 318 are fresh)."""
+    """fn_financial fields NOT in submissions (317 of 318 are fresh).
+    Excludes fnd2_/fnd6_ group-typed fields which silently produce bad sims."""
     names = get_all_field_names()
     fn = names.get("fn_financial", [])
-    return [f for f in fn if f.lower() not in _SATURATED_FIELDS and "event" not in f.lower()]
+    return [f for f in fn if f.lower() not in _SATURATED_FIELDS
+            and "event" not in f.lower()
+            and not f.startswith("fnd2_")
+            and not f.startswith("fnd6_")]
 
 
 def get_fresh_estimate_fields() -> list[str]:

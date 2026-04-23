@@ -68,7 +68,7 @@ REFINEMENT_PROBABILITY = 0.50  # v7.2.1: 50/50 refine vs fresh (was 0.40)
 if SPRINT_MODE:
     REFINEMENT_PROBABILITY = 0.55  # 55% refine, 45% fresh
 
-MIN_REFINEMENT_SHARPE = 0.95
+MIN_REFINEMENT_SHARPE = 1.15  # v7.2.1: raised from 0.95 to prevent queue buildup. Eligibility bar is 1.25, so 1.15 is "close enough to retry with settings tweaks"
 FRONTIER_MIN_SHARPE = 0.95
 FRONTIER_MIN_FITNESS = 0.75  # v7.2.1: was 0.50 — F=0.50 never reaches F≥1.0 through settings alone
 FRONTIER_ALT_MIN_SHARPE = 1.35
